@@ -160,7 +160,7 @@ func (w *window) collectAndroidNodes(
 			*nodes = append(*nodes, androidAccessNode{
 				id:     *nextID,
 				role:   role,
-				label:  accessible.AccessibilityLabel(),
+				label:  fyne.AccessibleLabel(obj),
 				x:      scale.ToScreenCoordinate(w.canvas, objPos.X),
 				y:      scale.ToScreenCoordinate(w.canvas, objPos.Y),
 				width:  scale.ToScreenCoordinate(w.canvas, obj.Size().Width),

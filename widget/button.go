@@ -2,6 +2,8 @@ package widget
 
 import (
 	"image/color"
+	"path/filepath"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -100,9 +102,19 @@ func (b *Button) AccessibilityLabel() string {
 		return b.Text
 	}
 	if b.Icon != nil {
-		return b.Icon.Name()
+		return iconMeaning(b.Icon.Name())
 	}
 	return ""
+}
+
+// iconMeaning is what an icon's resource name says it means, for a button
+// that shows only the icon: "foreground_folder-open.svg" -> "folder open".
+func iconMeaning(name string) string {
+	name = strings.TrimSuffix(name, filepath.Ext(name))
+	for _, prefix := range []string{"foreground_", "background_", "primary_", "error_", "success_", "warning_", "disabled_", "inverted_"} {
+		name = strings.TrimPrefix(name, prefix)
+	}
+	return strings.TrimSpace(strings.NewReplacer("-", " ", "_", " ").Replace(name))
 }
 
 // AccessibilityRole for a button is fyne.AccessibleRoleButton.

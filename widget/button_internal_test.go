@@ -239,3 +239,10 @@ func TestButtonRenderer_CornerRadius(t *testing.T) {
 
 	assert.Equal(t, button.Theme().Size(theme.SizeNameButtonRadius), render.background.CornerRadius)
 }
+
+func TestButton_AccessibilityLabelOfAnIcon(t *testing.T) {
+	assert.Equal(t, "folder open", iconMeaning("foreground_folder-open.svg"))
+	assert.Equal(t, "cancel", iconMeaning("foreground_cancel.svg"))
+	assert.Equal(t, "Save", NewButton("Save", nil).AccessibilityLabel())
+	assert.Equal(t, "content copy", NewButtonWithIcon("", theme.ContentCopyIcon(), nil).AccessibilityLabel())
+}

@@ -752,3 +752,13 @@ func BenchmarkContentMinSize(b *testing.B) {
 
 	assert.Equal(b, minSize, minSize)
 }
+
+// A row of several labels is named by their text together (it was named
+// "Container").
+func TestList_AccessibilityLabelOfARow(t *testing.T) {
+	row := &fyne.Container{Objects: []fyne.CanvasObject{NewLabel("12"), NewIcon(nil), NewLabel("INT. BARN - DAY")}}
+	assert.Equal(t, "12 INT. BARN - DAY", accessibleTextOf(row))
+	item := &listItem{child: row}
+	assert.Equal(t, "12 INT. BARN - DAY", item.AccessibilityLabel())
+	assert.Equal(t, "Rain", (&listItem{child: NewLabel("Rain")}).AccessibilityLabel())
+}

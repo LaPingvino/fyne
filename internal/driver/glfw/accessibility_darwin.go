@@ -273,7 +273,7 @@ func (w *window) collectAccessibilityElements(
 	currentElement := parent
 
 	if accessible, ok := obj.(fyne.Accessible); ok {
-		label := accessible.AccessibilityLabel()
+		label := fyne.AccessibleLabel(obj)
 		role := accessible.AccessibilityRole()
 
 		pixelX := scale.ToScreenCoordinate(w.canvas, objPos.X)

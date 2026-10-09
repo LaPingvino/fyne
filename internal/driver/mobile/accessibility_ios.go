@@ -146,7 +146,7 @@ func (w *window) collectIOSNodes(
 		if role != iosRoleContainer {
 			*nodes = append(*nodes, iosAccessNode{
 				role:   role,
-				label:  accessible.AccessibilityLabel(),
+				label:  fyne.AccessibleLabel(obj),
 				x:      float32(scale.ToScreenCoordinate(w.canvas, objPos.X)),
 				y:      float32(scale.ToScreenCoordinate(w.canvas, objPos.Y)),
 				width:  float32(scale.ToScreenCoordinate(w.canvas, obj.Size().Width)),

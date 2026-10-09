@@ -53,7 +53,7 @@ func (w *window) collectAccessibleElements(obj fyne.CanvasObject, pos fyne.Posit
 		role := accessible.AccessibilityRole()
 		// Use flat model: skip containers, only add leaf elements
 		if role != fyne.AccessibleRoleContainer {
-			label := accessible.AccessibilityLabel()
+			label := fyne.AccessibleLabel(obj)
 
 			pixelX := scale.ToScreenCoordinate(w.canvas, objPos.X)
 			pixelY := scale.ToScreenCoordinate(w.canvas, objPos.Y)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -724,10 +725,40 @@ func (li *listItem) AccessibilityRole() fyne.AccessibleRole {
 //
 // Since: 2.8
 func (li *listItem) AccessibilityLabel() string {
-	if a, ok := li.child.(fyne.Accessible); ok {
-		return a.AccessibilityLabel()
+	if a, ok := li.child.(fyne.Accessible); ok && a.AccessibilityRole() != fyne.AccessibleRoleContainer {
+		return fyne.AccessibleLabel(li.child)
 	}
-	return ""
+	// a row made of several objects: their labels together
+	return accessibleTextOf(li.child)
+}
+
+// accessibleTextOf is the labels of the accessible objects in obj, in
+// order, joined: what a row of labels and icons says.
+func accessibleTextOf(obj fyne.CanvasObject) string {
+	var parts []string
+	var walk func(o fyne.CanvasObject)
+	walk = func(o fyne.CanvasObject) {
+		if o == nil || !o.Visible() {
+			return
+		}
+		if a, ok := o.(fyne.Accessible); ok && a.AccessibilityRole() != fyne.AccessibleRoleContainer {
+			if l := strings.TrimSpace(fyne.AccessibleLabel(o)); l != "" {
+				parts = append(parts, l)
+			}
+			return
+		}
+		if ac, ok := o.(fyne.AccessibleChildren); ok {
+			for _, c := range ac.AccessibilityChildren() {
+				walk(c)
+			}
+		} else if c, ok := o.(*fyne.Container); ok {
+			for _, c := range c.Objects {
+				walk(c)
+			}
+		}
+	}
+	walk(obj)
+	return strings.Join(parts, " ")
 }
 
 // AccessibilityStates returns the current state flags that assistive

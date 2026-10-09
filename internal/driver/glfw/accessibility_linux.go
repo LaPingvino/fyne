@@ -122,6 +122,8 @@ func (w *window) updateAccessibility() {
 	}
 	nodes := []atspi.Node{win}
 	seen := map[uint64]bool{}
+	auto := fyne.AccessibilityAutomatic()
+	guessed := map[fyne.CanvasObject]string{} // names the automatic mode found
 	var walk func(obj fyne.CanvasObject, pos fyne.Position, parent int)
 	walk = func(obj fyne.CanvasObject, pos fyne.Position, parent int) {
 		if obj == nil || !obj.Visible() {
@@ -133,12 +135,21 @@ func (w *window) updateAccessibility() {
 			seen[id] = true
 			a11y.owner[id] = w
 			n := w.a11yNode(obj, acc, id, objPos)
+			if name, ok := guessed[obj]; ok {
+				n.Name = name
+			}
 			n.Parent = nodes[parent].ID
 			nodes[parent].Children = append(nodes[parent].Children, id)
 			nodes = append(nodes, n)
 			parent = len(nodes) - 1
 		}
-		for _, child := range common.AccessibilityChildren(obj) {
+		children := common.AccessibilityChildren(obj)
+		if auto {
+			for o, name := range common.AutomaticLabels(children) {
+				guessed[o] = name
+			}
+		}
+		for _, child := range children {
 			walk(child, objPos, parent)
 		}
 	}
@@ -219,7 +230,7 @@ func (w *window) updateAccessibility() {
 func (w *window) a11yNode(obj fyne.CanvasObject, acc fyne.Accessible, id uint64, pos fyne.Position) atspi.Node {
 	role := acc.AccessibilityRole()
 	px := func(v float32) int32 { return int32(scale.ToScreenCoordinate(w.canvas, v)) }
-	n := atspi.Node{ID: id, Role: roleToAtspi(role), Name: acc.AccessibilityLabel(),
+	n := atspi.Node{ID: id, Role: roleToAtspi(role), Name: fyne.AccessibleLabel(obj),
 		Bounds: atspi.Rect{X: px(pos.X), Y: px(pos.Y), Width: px(obj.Size().Width), Height: px(obj.Size().Height)},
 		States: []atspi.State{atspi.StateShowing, atspi.StateVisible}}
 
