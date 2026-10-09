@@ -3,6 +3,7 @@
 package glfw
 
 import (
+	"sort"
 	"sync"
 
 	"github.com/LaPingvino/atspi"
@@ -161,6 +162,7 @@ func (w *window) updateAccessibility() {
 			delete(a11y.texts, id)
 		}
 	}
+	sortByPosition(nodes)
 	a11y.nodes[w] = nodes
 	var all []atspi.Node
 	for _, ns := range a11y.nodes {
@@ -434,4 +436,24 @@ func (w *window) cleanupAccessibilityForWindow() {
 	}
 	a11y.mu.Unlock()
 	a11y.bridge.Update(all)
+}
+
+// sortByPosition puts each object's children in reading order: top to
+// bottom, then left to right, as they are seen; the order of a layout's
+// objects is not that (a Border's content comes before its top bar).
+func sortByPosition(nodes []atspi.Node) {
+	at := make(map[uint64]atspi.Rect, len(nodes))
+	for _, n := range nodes {
+		at[n.ID] = n.Bounds
+	}
+	for i := range nodes {
+		sort.SliceStable(nodes[i].Children, func(a, b int) bool {
+			ra, rb := at[nodes[i].Children[a]], at[nodes[i].Children[b]]
+			// on the same row: the one more to the left first
+			if ra.Y+ra.Height <= rb.Y || rb.Y+rb.Height <= ra.Y {
+				return ra.Y < rb.Y
+			}
+			return ra.X < rb.X
+		})
+	}
 }

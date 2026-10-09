@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/LaPingvino/atspi"
+
 	"github.com/stretchr/testify/assert"
 )
 
@@ -17,8 +19,10 @@ func (t *tellings) TextInserted(id uint64, offset int, s string) {
 func (t *tellings) TextDeleted(id uint64, offset int, s string) {
 	*t = append(*t, fmt.Sprintf("delete %d %q", offset, s))
 }
-func (t *tellings) CaretMoved(id uint64, offset int) { *t = append(*t, fmt.Sprintf("caret %d", offset)) }
-func (t *tellings) SelectionChanged(id uint64)       { *t = append(*t, "selection") }
+func (t *tellings) CaretMoved(id uint64, offset int) {
+	*t = append(*t, fmt.Sprintf("caret %d", offset))
+}
+func (t *tellings) SelectionChanged(id uint64) { *t = append(*t, "selection") }
 
 // What a screen reader hears of text changing: the part that differs
 // (in runes), then the caret; a selection only when there is one.
@@ -40,4 +44,17 @@ func TestTextEvents(t *testing.T) {
 		}
 		assert.Equal(t, c.want, []string(got), "%v -> %v", c.before, c.now)
 	}
+}
+
+// Children in reading order: rows top to bottom, each left to right.
+func TestSortByPosition(t *testing.T) {
+	nodes := []atspi.Node{
+		{ID: 1, Children: []uint64{2, 3, 4, 5}},
+		{ID: 2, Bounds: atspi.Rect{X: 0, Y: 100, Width: 500, Height: 400}}, // the content
+		{ID: 3, Bounds: atspi.Rect{X: 60, Y: 0, Width: 40, Height: 40}},    // toolbar, second button
+		{ID: 4, Bounds: atspi.Rect{X: 0, Y: 500, Width: 500, Height: 20}},  // status bar
+		{ID: 5, Bounds: atspi.Rect{X: 10, Y: 5, Width: 40, Height: 30}},    // toolbar, first button
+	}
+	sortByPosition(nodes)
+	assert.Equal(t, []uint64{5, 3, 2, 4}, nodes[0].Children)
 }
