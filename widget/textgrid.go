@@ -644,7 +644,10 @@ func (t *textGridContentRenderer) addRowsIfRequired() {
 
 func (t *textGridContentRenderer) updateCellSize() {
 	th := t.text.Theme()
-	size := fyne.MeasureText("M", th.Size(theme.SizeNameText), fyne.TextStyle{Monospace: true})
+	// measured in the font the cells are drawn in (MeasureText would take
+	// the default theme's, not an override's)
+	style := fyne.TextStyle{Monospace: true}
+	size, _ := fyne.CurrentApp().Driver().RenderedTextSize("M", th.Size(theme.SizeNameText), style, th.Font(style))
 
 	// round it for seamless background
 	size.Width = float32(math.Round(float64(size.Width)))
@@ -663,6 +666,9 @@ type textGridRow struct {
 
 	cachedFGColor  color.Color
 	cachedTextSize float32
+	// cachedTheme is the grid's theme (with any override around it), whose
+	// fonts its cells are drawn in
+	cachedTheme fyne.Theme
 }
 
 func newTextGridRow(t *textGridContent, row int) *textGridRow {
@@ -735,11 +741,20 @@ func (t *textGridRow) setCellRune(str rune, pos int, style, rowStyle TextGridSty
 		fg = rowStyle.TextColor()
 	}
 
+	// the cell's font, named: a theme override's font is not part of the
+	// caches of text sizes and textures, and a letter drawn in another font
+	// elsewhere was used for it (letters of the wrong size and shape)
+	var source fyne.Resource
+	if t.cachedTheme != nil {
+		source = t.cachedTheme.Font(textStyle)
+	}
+
 	newStr := string(str)
-	if text.Text != newStr || text.Color != fg || textStyle != text.TextStyle {
+	if text.Text != newStr || text.Color != fg || textStyle != text.TextStyle || text.FontSource != source {
 		text.Text = newStr
 		text.Color = fg
 		text.TextStyle = textStyle
+		text.FontSource = source
 		text.Refresh()
 	}
 
@@ -901,6 +916,7 @@ func (t *textGridRowRenderer) Refresh() {
 	v := fyne.CurrentApp().Settings().ThemeVariant()
 	t.obj.cachedFGColor = th.Color(theme.ColorNameForeground, v)
 	t.obj.cachedTextSize = th.Size(theme.SizeNameText)
+	t.obj.cachedTheme = th
 	TextGridStyleWhitespace = &CustomTextGridStyle{FGColor: th.Color(theme.ColorNameDisabled, v)}
 	t.obj.updateGridSize(t.obj.text.text.Size())
 	t.obj.refreshCells()

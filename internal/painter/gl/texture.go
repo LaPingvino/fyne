@@ -70,6 +70,10 @@ func (p *painter) getTexture(object fyne.CanvasObject, creator func(canvasObject
 		custom := ""
 		if t.FontSource != nil {
 			custom = t.FontSource.Name()
+		} else if scope := cache.WidgetScopeID(t); scope != "" {
+			// a theme override's fonts: not the same texture as the same
+			// text in the app's theme
+			custom = "scope:" + scope
 		}
 		ent := cache.FontCacheEntry{Color: t.Color, Canvas: p.canvas}
 		ent.Text = t.Text
