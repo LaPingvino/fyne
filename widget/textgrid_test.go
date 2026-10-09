@@ -7,6 +7,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/internal/cache"
 	"fyne.io/fyne/v2/internal/widget"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/theme"
@@ -489,4 +490,49 @@ func assertGridStyle(t *testing.T, g *TextGrid, content string, expectedStyles m
 func rendererCell(r *textGridRowRenderer, col int) (*canvas.Rectangle, *canvas.Text) {
 	i := col * 2
 	return r.obj.objects[i].(*canvas.Rectangle), r.obj.objects[i+1].(*canvas.Text)
+}
+
+type fontTheme struct {
+	fyne.Theme
+	mono fyne.Resource
+}
+
+func (f *fontTheme) Font(s fyne.TextStyle) fyne.Resource {
+	if s.Monospace {
+		return f.mono
+	}
+	return f.Theme.Font(s)
+}
+
+// Under a theme override, the cells are drawn (and sized, and cached) in
+// the override's font: without naming it, the caches of text sizes and
+// textures gave letters drawn in another font elsewhere.
+func TestTextGrid_ThemeOverrideFont(t *testing.T) {
+	test.NewTempApp(t)
+	mono := fyne.NewStaticResource("override-mono.ttf", theme.TextMonospaceFont().Content())
+	grid := NewTextGridFromString("AB")
+	cache.OverrideTheme(grid, &fontTheme{Theme: test.Theme(), mono: mono})
+	w := test.NewTempWindow(t, grid)
+	w.Resize(fyne.NewSize(100, 50))
+	grid.Refresh()
+
+	found := 0
+	var walk func(o fyne.CanvasObject)
+	walk = func(o fyne.CanvasObject) {
+		if txt, ok := o.(*canvas.Text); ok && (txt.Text == "A" || txt.Text == "B") {
+			found++
+			assert.Equal(t, mono, txt.FontSource, "cell %q", txt.Text)
+		}
+		if wid, ok := o.(fyne.Widget); ok {
+			for _, c := range test.TempWidgetRenderer(t, wid).Objects() {
+				walk(c)
+			}
+		} else if c, ok := o.(*fyne.Container); ok {
+			for _, k := range c.Objects {
+				walk(k)
+			}
+		}
+	}
+	walk(grid)
+	assert.Equal(t, 2, found)
 }
