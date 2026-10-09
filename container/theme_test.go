@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"fyne.io/fyne/v2"
+
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/internal/cache"
 	"fyne.io/fyne/v2/test"
@@ -66,4 +68,11 @@ func TestThemeOverride_CurrentTheme(t *testing.T) {
 
 	text = test.WidgetRenderer(l).Objects()[0].(*widget.RichText).Segments[0].Visual()
 	assert.Equal(t, color.NRGBA{R: 0, G: 0, B: 0, A: 0xff}, text.(*canvas.Text).Color)
+}
+
+func TestThemeOverride_AccessibilityChildren(t *testing.T) {
+	l := widget.NewLabel("inside")
+	o := NewThemeOverride(l, test.Theme())
+	assert.Equal(t, []fyne.CanvasObject{l}, o.AccessibilityChildren())
+	assert.Nil(t, (&ThemeOverride{}).AccessibilityChildren())
 }

@@ -116,3 +116,14 @@ func (r *overrideRenderer) Objects() []fyne.CanvasObject {
 
 func (*overrideRenderer) Refresh() {
 }
+
+// AccessibilityChildren returns the content, so that assistive technologies
+// see through the theme override.
+//
+// Since: 2.9
+func (t *ThemeOverride) AccessibilityChildren() []fyne.CanvasObject {
+	if t.Content == nil {
+		return nil
+	}
+	return []fyne.CanvasObject{t.Content}
+}
