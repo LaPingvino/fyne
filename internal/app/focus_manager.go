@@ -106,6 +106,9 @@ func (f *FocusManager) nextWithWalker(current fyne.Focusable, walker walkerFunc)
 		if !ok {
 			return false
 		}
+		if s, ok := obj.(interface{ SkipsFocusChain() bool }); ok && s.SkipsFocusChain() {
+			return false // reached otherwise (a tab bar's other tabs: the arrow keys)
+		}
 
 		if found {
 			next = focus

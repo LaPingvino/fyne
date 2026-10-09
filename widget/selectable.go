@@ -126,28 +126,7 @@ func (s *selectable) SelectedText() string {
 		return ""
 	}
 
-	out := strings.Builder{}
-	off := 0
-	for _, seg := range s.provider.contentSegments() {
-		if off >= stop {
-			break
-		}
-
-		if marker, ok := seg.(*listMarkerSegment); ok {
-			if off >= start {
-				out.WriteString(marker.SelectedText())
-			}
-			continue
-		}
-
-		r := ([]rune)(seg.Textual())
-		from, to := max(start-off, 0), min(stop-off, len(r))
-		if from < to {
-			out.WriteString(string(r[from:to]))
-		}
-		off += len(r)
-	}
-	return out.String()
+	return s.provider.textBetween(start, stop)
 }
 
 func (s *selectable) Tapped(*fyne.PointEvent) {
@@ -241,7 +220,9 @@ func (s *selectable) getRowCol(p fyne.Position) (row, col int) {
 		row = s.provider.rows() - 1
 		col = s.provider.rowLength(row)
 	} else {
-		col = s.cursorColAt(row, p)
+		textSize := th.Size(s.getSizeName())
+		offset := s.provider.rowAlignOffset(row, textSize, innerPad)
+		col = s.cursorColAt(row, p.SubtractXY(offset, 0))
 	}
 
 	return row, col
@@ -389,7 +370,7 @@ func (r *selectableRenderer) buildSelection() {
 	getCoordinates := func(column int, row int) (float32, float32) {
 		sz := provider.lineSizeToColumn(column, row, textSize, innerPad)
 		y, _ := provider.rowGeometry(row)
-		return sz.Width, y - th.Size(theme.SizeNameInputBorder) + innerPad
+		return sz.Width + provider.rowAlignOffset(row, textSize, innerPad), y - th.Size(theme.SizeNameInputBorder) + innerPad
 	}
 	rowHeight := func(row int) float32 {
 		_, h := provider.rowGeometry(row)

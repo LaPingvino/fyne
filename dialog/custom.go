@@ -105,3 +105,12 @@ func ShowCustomConfirm(title, confirm, dismiss string, content fyne.CanvasObject
 ) {
 	NewCustomConfirm(title, confirm, dismiss, content, callback, parent).Show()
 }
+
+// SetOnEscape sets what the Escape key does while the dialog is shown (a
+// dialog without a dismiss button ignores Escape otherwise; one with a
+// dismiss button is dismissed).
+//
+// Since: 2.9
+func (d *CustomDialog) SetOnEscape(f func()) {
+	d.onEscape = f
+}

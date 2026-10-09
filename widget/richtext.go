@@ -24,6 +24,7 @@ import (
 
 const (
 	averageChar  = "M"
+	ellipsisChar = "…"
 	passwordChar = "•"
 )
 
@@ -43,6 +44,12 @@ type RichText struct {
 	// Since: 2.4
 	Truncation fyne.TextTruncation
 
+	// If set to true, Selectable indicates that this rich text should support select interaction
+	// to allow the text to be copied.
+	//
+	// Since: 2.9
+	Selectable bool
+
 	inset     fyne.Size     // this varies due to how the widget works (entry with scroller vs others with padding)
 	rowBounds []rowBoundary // cache for boundaries
 	scr       *widget.Scroll
@@ -58,6 +65,10 @@ type RichText struct {
 	// above the panels that blocks sit on but below the text
 	highlight  *selectable
 	highlights []fyne.CanvasObject
+
+	selection *focusSelectable    // handles select interaction when Selectable is set
+	visuals   []fyne.CanvasObject // everything we draw, apart from selection highlights
+	lead      int                 // how many of the visuals come before those of the text
 }
 
 // rowDecoration is a graphical element drawn behind a run of rows, such as the
@@ -137,6 +148,7 @@ func (t *RichText) MinSize() fyne.Size {
 func (t *RichText) Refresh() {
 	t.minCache = fyne.Size{}
 	t.updateRowBounds()
+	t.checkSelection()
 
 	for _, s := range t.Segments {
 		switch seg := s.(type) {
@@ -171,6 +183,31 @@ func (t *RichText) Resize(size fyne.Size) {
 	t.Refresh()
 }
 
+// SelectedText returns the text currently selected in this RichText.
+// If the rich text is not Selectable it will return an empty string.
+// If there is no selection it will return the empty string.
+//
+// Since: 2.9
+func (t *RichText) SelectedText() string {
+	if !t.Selectable || t.selection == nil {
+		return ""
+	}
+
+	return t.selection.SelectedText()
+}
+
+// ClearSelection removes any active text selection in this RichText.
+// It has no effect if the RichText is not Selectable or nothing is currently selected.
+//
+// Since: 2.9
+func (t *RichText) ClearSelection() {
+	if !t.Selectable || t.selection == nil || !t.selection.selecting {
+		return
+	}
+	t.selection.selecting = false
+	t.Refresh()
+}
+
 // String returns the text widget buffer as string
 func (t *RichText) String() string {
 	ret := strings.Builder{}
@@ -194,6 +231,77 @@ func (t *RichText) AccessibilityRole() fyne.AccessibleRole {
 // Since: 2.8
 func (t *RichText) AccessibilityLabel() string {
 	return t.String()
+}
+
+// textBetween returns the text between the specified positions, which are rune
+// offsets into the whole content. A line break is added wherever the range spans
+// a change of block, such as from one paragraph to the next, that the content
+// does not mark with a new line of its own. Each list item that starts inside the
+// range is introduced by its marker, so that the structure of a list is kept.
+func (t *RichText) textBetween(start, stop int) string {
+	runes := []rune(t.String())
+	stop = min(stop, len(runes))
+	start = max(min(start, stop), 0)
+
+	markers := t.markersBetween(start, stop)
+	ret := strings.Builder{}
+	writeTo := func(pos int) {
+		for len(markers) > 0 && markers[0].pos < pos {
+			ret.WriteString(string(runes[start:markers[0].pos]))
+			ret.WriteString(markers[0].text)
+			start = markers[0].pos
+			markers = markers[1:]
+		}
+		ret.WriteString(string(runes[start:pos]))
+		start = pos
+	}
+
+	for row := 0; row < t.rows()-1; row++ {
+		bound, next := &t.rowBounds[row], &t.rowBounds[row+1]
+		if next.docBegin <= start {
+			continue
+		}
+		if next.docBegin >= stop {
+			break
+		}
+
+		lastSeg := bound.segments[len(bound.segments)-1]
+		if next.segments[0] == lastSeg || bound.docEnd != next.docBegin {
+			continue // a wrapped line, or a new line that is part of the text
+		}
+		writeTo(next.docBegin)
+		ret.WriteByte('\n')
+	}
+
+	writeTo(stop)
+	return ret.String()
+}
+
+// selectedMarker is the text of a list marker and the rune offset of the item it introduces.
+type selectedMarker struct {
+	pos  int
+	text string
+}
+
+// markersBetween returns the markers of the list items that start inside the
+// specified range of rune offsets, in the order that they appear.
+func (t *RichText) markersBetween(start, stop int) []selectedMarker {
+	var markers []selectedMarker
+	off := 0
+	for _, seg := range t.contentSegments() {
+		if off >= stop {
+			break
+		}
+
+		if marker, ok := seg.(*listMarkerSegment); ok {
+			if off >= start {
+				markers = append(markers, selectedMarker{pos: off, text: marker.SelectedText()})
+			}
+			continue
+		}
+		off += utf8.RuneCountInString(seg.Textual())
+	}
+	return markers
 }
 
 // contentSegments returns the segments that carry the content of this rich text,
@@ -555,6 +663,30 @@ func (t *RichText) lineSizeToColumn(col, row int, textSize, innerPad float32) fy
 	return total.Add(fyne.NewSize(innerPad-t.inset.Width+leftPad, 0))
 }
 
+// rowAlignOffset returns the horizontal offset of the text in the specified row
+// caused by it being center or trailing aligned within the widget width.
+func (t *RichText) rowAlignOffset(row int, textSize, innerPad float32) float32 {
+	bound := t.rowBoundary(row)
+	if bound == nil {
+		return 0
+	}
+	_, align := t.rowPaddingAndAlign(*bound, 0, fyne.TextAlignLeading)
+	if align == fyne.TextAlignLeading {
+		return 0
+	}
+
+	xInset := innerPad - t.inset.Width
+	lineWidth := t.Size().Width - xInset*2
+	textWidth := t.lineSizeToColumn(t.rowLength(row), row, textSize, innerPad).Width - xInset
+	if text, ok := bound.segments[len(bound.segments)-1].(*TextSegment); ok && bound.ellipsis {
+		textWidth += fyne.MeasureText(ellipsisChar, text.size(), text.Style.TextStyle).Width
+	}
+	if align == fyne.TextAlignCenter {
+		return (lineWidth - textWidth) / 2
+	}
+	return lineWidth - textWidth
+}
+
 // Row returns the characters in the row specified.
 // The row parameter should be between 0 and t.Rows()-1.
 func (t *RichText) row(row int) []rune {
@@ -811,7 +943,75 @@ type RichTextBlock interface {
 func (t *RichText) setHighlights(sel *selectable, objs []fyne.CanvasObject) {
 	t.highlight, t.highlights = sel, objs
 
+	t.updateScrollContent() // scrolled content is not asked for its objects, so slot them in now
 	canvas.Refresh(t.super())
+}
+
+// layeredVisuals returns everything that this rich text draws, from the back to
+// the front. Any selection highlights are slotted in above the panels that blocks
+// sit on and below the text itself.
+func (t *RichText) layeredVisuals() []fyne.CanvasObject {
+	objs := t.visuals
+	if len(t.decor) == 0 {
+		return objs
+	}
+
+	highlights := t.highlightObjects()
+	if len(highlights) == 0 {
+		return objs
+	}
+
+	at := min(t.lead, len(objs))
+	out := make([]fyne.CanvasObject, 0, len(objs)+len(highlights))
+	out = append(out, objs[:at]...)
+	out = append(out, highlights...)
+	return append(out, objs[at:]...)
+}
+
+// updateScrollContent sets what is drawn inside the scroller, if we have one.
+func (t *RichText) updateScrollContent() {
+	if t.scr == nil {
+		return
+	}
+	if inner := scrollInnerContainer(t.scr); inner != nil && inner.Objects != nil {
+		inner.Objects = t.layeredVisuals()
+	}
+}
+
+// selectionWidget returns the widget that handles select interaction for this
+// content, or nil if it is not Selectable.
+func (t *RichText) selectionWidget() *focusSelectable {
+	if !t.Selectable {
+		if t.selection != nil {
+			t.selection.selecting = false
+		}
+		return nil
+	}
+
+	if t.selection == nil {
+		t.selection = &focusSelectable{}
+		t.selection.ExtendBaseWidget(t.selection)
+		t.selection.focus = t.selection
+		t.selection.provider = t
+	}
+	t.selection.theme = t.Theme()
+	return t.selection
+}
+
+// checkSelection drops a selection that the content no longer reaches, which can
+// happen when the segments are changed whilst text is selected.
+func (t *RichText) checkSelection() {
+	sel := t.selection
+	if sel == nil || !sel.selecting {
+		return
+	}
+
+	inContent := func(row, col int) bool {
+		return row < t.rows() && col <= t.rowLength(row)
+	}
+	if !inContent(sel.cursorRow, sel.cursorColumn) || !inContent(sel.selectRow, sel.selectColumn) {
+		sel.selecting = false
+	}
 }
 
 // highlightObjects returns the selection rectangles to draw over this content.
@@ -878,35 +1078,19 @@ func codeInlineText(obj fyne.CanvasObject) (*canvas.Text, bool) {
 // textObjects returns the visuals of the rendered segments, leaving out the
 // decorations that are drawn behind them.
 func (r *textRenderer) textObjects() []fyne.CanvasObject {
-	objs := r.BaseRenderer.Objects()
-	if r.obj.scr != nil {
-		objs = r.obj.scr.Content.(*fyne.Container).Objects[1].(*fyne.Container).Objects
-	}
-
-	if len(r.obj.decor) > len(objs) { // a refresh has not caught up with the decorations yet
+	if r.obj.lead > len(r.obj.visuals) {
 		return nil
 	}
-	return objs[len(r.obj.decor):]
+	return r.obj.visuals[r.obj.lead:]
 }
 
-// Objects returns the visuals of this rich text, with any selection highlights
-// slotted in above the panels that blocks sit on and below the text itself.
+// Objects returns the visuals of this rich text, or the scroller that holds them.
 func (r *textRenderer) Objects() []fyne.CanvasObject {
-	objs := r.BaseRenderer.Objects()
-	if len(r.obj.decor) == 0 {
-		return objs
+	if r.obj.scr != nil {
+		return r.BaseRenderer.Objects()
 	}
 
-	highlights := r.obj.highlightObjects()
-	if len(highlights) == 0 {
-		return objs
-	}
-
-	at := min(len(r.obj.decor), len(objs))
-	out := make([]fyne.CanvasObject, 0, len(objs)+len(highlights))
-	out = append(out, objs[:at]...)
-	out = append(out, highlights...)
-	return append(out, objs[at:]...)
+	return r.obj.layeredVisuals()
 }
 
 func (r *textRenderer) Layout(size fyne.Size) {
@@ -914,6 +1098,13 @@ func (r *textRenderer) Layout(size fyne.Size) {
 	bounds := r.obj.rowBounds
 	if r.obj.scr != nil {
 		r.obj.scr.Resize(size)
+	}
+	if sel := r.obj.selection; sel != nil {
+		if r.obj.scr != nil {
+			sel.Resize(r.obj.scr.Content.Size()) // cover everything that can be scrolled to
+		} else {
+			sel.Resize(size)
+		}
 	}
 	objs := r.textObjects()
 
@@ -1036,7 +1227,7 @@ func (r *textRenderer) MinSize() fyne.Size {
 			return minBounds
 		}
 		if trunc == fyne.TextTruncateEllipsis {
-			ellipsisSize := fyne.MeasureText("…", th.Size(theme.SizeNameText), fyne.TextStyle{})
+			ellipsisSize := fyne.MeasureText(ellipsisChar, th.Size(theme.SizeNameText), fyne.TextStyle{})
 			return minBounds.AddWidthHeight(ellipsisSize.Width, 0)
 		}
 	}
@@ -1119,7 +1310,13 @@ func (r *textRenderer) Refresh() {
 	bounds := r.obj.rowBounds
 	scroll := r.obj.Scroll
 
-	objs := r.obj.updateDecorations()
+	var objs []fyne.CanvasObject
+	sel := r.obj.selectionWidget()
+	if sel != nil {
+		objs = append(objs, sel) // behind the content, so that hyperlinks etc can still be tapped
+	}
+	objs = append(objs, r.obj.updateDecorations()...)
+	lead := len(objs)
 	for _, bound := range bounds {
 		for i, seg := range bound.segments {
 			_, isText := seg.(*TextSegment)
@@ -1152,7 +1349,7 @@ func (r *textRenderer) Refresh() {
 				txt = string(runes)
 			}
 			if bound.ellipsis && i == len(bound.segments)-1 {
-				txt = txt + "…"
+				txt = txt + ellipsisChar
 			}
 
 			if concealed(seg) {
@@ -1172,16 +1369,17 @@ func (r *textRenderer) Refresh() {
 		}
 	}
 
+	r.obj.visuals, r.obj.lead = objs, lead
 	if r.obj.scr != nil {
 		if inner := scrollInnerContainer(r.obj.scr); inner != nil {
 			if inner.Objects == nil {
 				r.obj.scr.Content = &fyne.Container{Layout: layout.NewStackLayout(), Objects: []fyne.CanvasObject{
-					r.obj.prop, &fyne.Container{Objects: objs},
+					r.obj.prop, &fyne.Container{Objects: r.obj.layeredVisuals()},
 				}}
 				r.obj.scr.Direction = scroll
 				r.SetObjects([]fyne.CanvasObject{r.obj.scr})
 			} else {
-				inner.Objects = objs
+				inner.Objects = r.obj.layeredVisuals()
 			}
 		}
 		r.obj.scr.Refresh()
@@ -1190,6 +1388,9 @@ func (r *textRenderer) Refresh() {
 	}
 
 	r.Layout(r.obj.Size())
+	if sel != nil {
+		sel.Refresh() // the rows may have moved under what is selected
+	}
 	canvas.Refresh(r.obj.super())
 
 	r.obj.cleanVisualCache()
@@ -1385,7 +1586,7 @@ func ellipsisPriorBound(bounds []rowBoundary, trunc fyne.TextTruncation, width f
 		return bounds
 	}
 
-	ellipsisSize := fyne.MeasureText("…", seg.size(), seg.Style.TextStyle) //revive:disable-line:add-constant
+	ellipsisSize := fyne.MeasureText(ellipsisChar, seg.size(), seg.Style.TextStyle)
 
 	fitCount := howManyRunesFit([]rune(seg.Text)[prior.segBegin:prior.segEnd], width-ellipsisSize.Width, charWidth, measurer)
 	prior.segEnd = prior.segBegin + fitCount

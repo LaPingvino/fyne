@@ -26,10 +26,11 @@ type glCanvas struct {
 	padded  bool
 	size    fyne.Size
 
-	onTypedRune func(rune)
-	onTypedKey  func(*fyne.KeyEvent)
-	onKeyDown   func(*fyne.KeyEvent)
-	onKeyUp     func(*fyne.KeyEvent)
+	onTypedRune  func(rune)
+	onTypedKey   func(*fyne.KeyEvent)
+	onKeyDown    func(*fyne.KeyEvent)
+	onKeyPreview func(fyne.KeyName, fyne.KeyModifier) bool
+	onKeyUp      func(*fyne.KeyEvent)
 	// shortcut    fyne.ShortcutHandler
 
 	scale, detectedScale, texScale float32
@@ -304,4 +305,9 @@ func newCanvas() *glCanvas {
 	c.Initialize(c, c.overlayChanged)
 	c.applyContent(&canvas.Rectangle{FillColor: theme.Color(theme.ColorNameBackground)})
 	return c
+}
+
+// SetOnKeyPreview implements desktop.KeyPreviewCanvas.
+func (c *glCanvas) SetOnKeyPreview(preview func(fyne.KeyName, fyne.KeyModifier) bool) {
+	c.onKeyPreview = preview
 }

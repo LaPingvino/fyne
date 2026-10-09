@@ -26,6 +26,14 @@ type PopUp struct {
 	// Since: 2.9
 	OnDismiss func() `json:"-"`
 
+	// OnEscape, if set, is called when Escape is pressed while the PopUp is
+	// the top overlay; it reports whether it handled the key. Without it a
+	// non-modal PopUp (a menu, a drop-down) closes and a modal one leaves
+	// the key to the focused widget.
+	//
+	// Since: 2.9
+	OnEscape func() bool `json:"-"`
+
 	overlay       *widget.OverlayContainer
 	modal, manual bool
 }
@@ -66,6 +74,7 @@ func (p *PopUp) Show() {
 			dismiss = nil
 		}
 		p.overlay = widget.NewOverlayContainer(p.super(), p.Canvas, dismiss)
+		p.overlay.OnEscape = p.HandleEscape
 		if p.modal {
 			th := p.Theme()
 			v := fyne.CurrentApp().Settings().ThemeVariant()
@@ -262,4 +271,19 @@ func withRelativePosition(rel fyne.Position, to fyne.CanvasObject, f func(positi
 
 	pos := d.AbsolutePositionForObject(to).Add(rel)
 	f(pos)
+}
+
+// HandleEscape is called when Escape is pressed while the PopUp is the top
+// overlay; see OnEscape.
+//
+// Since: 2.9
+func (p *PopUp) HandleEscape() bool {
+	if p.OnEscape != nil {
+		return p.OnEscape()
+	}
+	if !p.modal {
+		p.Hide()
+		return true
+	}
+	return false
 }
