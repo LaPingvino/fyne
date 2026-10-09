@@ -520,6 +520,7 @@ var (
 type tabButton struct {
 	widget.DisableableWidget
 	hovered       bool
+	focused       bool
 	icon          fyne.Resource
 	iconPosition  buttonIconPosition
 	importance    widget.Importance
@@ -601,6 +602,88 @@ func (b *tabButton) Tapped(*fyne.PointEvent) {
 	}
 
 	b.onTapped()
+}
+
+// FocusGained is called when the tab gets the keyboard focus.
+func (b *tabButton) FocusGained() {
+	b.focused = true
+	b.Refresh()
+}
+
+// FocusLost is called when the tab loses the keyboard focus.
+func (b *tabButton) FocusLost() {
+	b.focused = false
+	b.Refresh()
+}
+
+// TypedRune does nothing: tabs are chosen with keys (TypedKey).
+func (*tabButton) TypedRune(rune) {}
+
+// TypedKey: Enter and Space choose the tab; the arrow keys, Home and End
+// choose the one beside it, the first or the last, and focus it (the
+// tab bar is one stop in the Tab order: SkipsFocusChain).
+func (b *tabButton) TypedKey(ev *fyne.KeyEvent) {
+	switch ev.Name {
+	case fyne.KeyReturn, fyne.KeyEnter, fyne.KeySpace:
+		b.Tapped(nil)
+	case fyne.KeyLeft, fyne.KeyUp:
+		b.moveFocus(-1, false)
+	case fyne.KeyRight, fyne.KeyDown:
+		b.moveFocus(1, false)
+	case fyne.KeyHome:
+		b.moveFocus(1, true)
+	case fyne.KeyEnd:
+		b.moveFocus(-1, true)
+	}
+}
+
+// SkipsFocusChain keeps all tabs but the chosen one out of the Tab order:
+// Tab goes from the tab bar to the page.
+func (b *tabButton) SkipsFocusChain() bool {
+	current := b.tabs.getCurrent()
+	if current < 0 {
+		current = 0
+	}
+	return b.index() != current
+}
+
+// index is the tab's place among the tabs (-1: not one of them).
+func (b *tabButton) index() int {
+	for i, it := range b.tabs.items() {
+		if it.button == b {
+			return i
+		}
+	}
+	return -1
+}
+
+// moveFocus chooses and focuses the next enabled tab in direction step
+// (wrapping around), or from the end when fromEnd: Home and End.
+func (b *tabButton) moveFocus(step int, fromEnd bool) {
+	items := b.tabs.items()
+	n := len(items)
+	if n == 0 {
+		return
+	}
+	i := b.index()
+	if fromEnd {
+		i = -1 // Home: from before the first
+		if step < 0 {
+			i = n // End: from after the last
+		}
+	}
+	for k := 0; k < n; k++ {
+		i = ((i+step)%n + n) % n
+		next := items[i].button
+		if next == nil || next.Disabled() || !next.Visible() {
+			continue // in the overflow menu, or disabled
+		}
+		next.Tapped(nil)
+		if c := fyne.CurrentApp().Driver().CanvasForObject(b); c != nil {
+			c.Focus(next)
+		}
+		return
+	}
 }
 
 type tabButtonRenderer struct {
@@ -697,7 +780,11 @@ func (r *tabButtonRenderer) Refresh() {
 	th := r.button.Theme()
 	v := fyne.CurrentApp().Settings().ThemeVariant()
 
-	if r.button.hovered && !r.button.Disabled() {
+	if r.button.focused && !r.button.Disabled() {
+		r.background.FillColor = th.Color(theme.ColorNameFocus, v)
+		r.background.CornerRadius = th.Size(theme.SizeNameSelectionRadius)
+		r.background.Show()
+	} else if r.button.hovered && !r.button.Disabled() {
 		r.background.FillColor = th.Color(theme.ColorNameHover, v)
 		r.background.CornerRadius = th.Size(theme.SizeNameSelectionRadius)
 		r.background.Show()
