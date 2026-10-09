@@ -21,6 +21,15 @@ type OverlayContainer struct {
 	canvas        fyne.Canvas
 	onDismiss     func()
 	shown, manual bool
+
+	// OnEscape, if set, handles Escape while this is the top overlay (see
+	// fyne.EscapeHandler).
+	OnEscape func() bool
+}
+
+// HandleEscape implements fyne.EscapeHandler.
+func (o *OverlayContainer) HandleEscape() bool {
+	return o.OnEscape != nil && o.OnEscape()
 }
 
 // NewOverlayContainer creates an OverlayContainer.

@@ -775,6 +775,17 @@ func (w *window) processKeyPressed(keyName fyne.KeyName, keyASCII fyne.KeyName, 
 		}
 	}
 
+	// the application's preview first, then Escape for the top overlay (a
+	// dialog cancels, a pop-up closes), then the focused widget
+	if preview := w.canvas.onKeyPreview; preview != nil && preview(keyName, keyDesktopModifier) {
+		return
+	}
+	if keyName == fyne.KeyEscape && keyDesktopModifier == 0 {
+		if h, ok := w.canvas.Overlays().Top().(fyne.EscapeHandler); ok && h.HandleEscape() {
+			return
+		}
+	}
+
 	modifierOtherThanShift := (keyDesktopModifier & fyne.KeyModifierControl) |
 		(keyDesktopModifier & fyne.KeyModifierAlt) |
 		(keyDesktopModifier & fyne.KeyModifierSuper)

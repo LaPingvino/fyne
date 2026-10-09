@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"fmt"
 	"image/color"
 	"testing"
 
@@ -175,4 +176,26 @@ func TestCustom_ContentLayout(t *testing.T) {
 
 	c.Layout.Layout(c.Objects, c.MinSize())
 	assert.Equal(t, d.content.Size(), initialSize)
+}
+
+// Escape dismisses a dialog as its dismiss button does; a dialog without
+// one does what SetOnEscape says, or nothing.
+func TestDialog_Escape(t *testing.T) {
+	w := test.NewTempWindow(t, nil)
+	w.Resize(fyne.NewSize(400, 300))
+
+	answered := ""
+	d := NewConfirm("Quit", "Really?", func(ok bool) { answered = fmt.Sprint(ok) }, w)
+	d.Show()
+	assert.True(t, w.Canvas().Overlays().Top().(fyne.EscapeHandler).HandleEscape())
+	assert.Equal(t, "false", answered, "Escape answers No")
+
+	c := NewCustomWithoutButtons("Busy", widget.NewLabel("…"), w)
+	c.Show()
+	assert.False(t, w.Canvas().Overlays().Top().(fyne.EscapeHandler).HandleEscape(), "nothing to do")
+	cancelled := false
+	c.SetOnEscape(func() { cancelled = true })
+	assert.True(t, w.Canvas().Overlays().Top().(fyne.EscapeHandler).HandleEscape())
+	assert.True(t, cancelled)
+	c.Hide()
 }

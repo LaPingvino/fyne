@@ -3,6 +3,7 @@
 package glfw
 
 import (
+	"fmt"
 	"image/color"
 	"net/url"
 	"os"
@@ -2512,4 +2513,52 @@ func (s *safeWindow) moveMouse(xpos, ypos float64) {
 	s.mouseMoved(s.viewport, xpos, ypos)
 	s.mousePosUpdateProcessed = true
 	s.processMouseMoved(s.newMousePosX, s.newMousePosY)
+}
+
+// Escape goes to the top overlay first: a pop-up closes, a modal one
+// with OnEscape handles it; without one the focused widget gets it.
+func TestWindow_EscapeForTheTopOverlay(t *testing.T) {
+	w := createWindow("Test")
+	entry := widget.NewEntry()
+	w.SetContent(entry)
+	repaintWindow(w)
+	w.Canvas().Focus(entry)
+
+	pop := widget.NewPopUp(widget.NewLabel("menu"), w.Canvas())
+	pop.Show()
+	w.keyPressed(nil, glfw.KeyEscape, 0, glfw.Press, 0)
+	w.keyPressed(nil, glfw.KeyEscape, 0, glfw.Release, 0)
+	assert.False(t, pop.Visible(), "Escape closes a pop-up")
+
+	escaped := 0
+	modal := widget.NewModalPopUp(widget.NewLabel("dialog"), w.Canvas())
+	modal.OnEscape = func() bool { escaped++; return true }
+	modal.Show()
+	w.keyPressed(nil, glfw.KeyEscape, 0, glfw.Press, 0)
+	assert.Equal(t, 1, escaped, "a modal pop-up's OnEscape")
+	assert.True(t, modal.Visible(), "OnEscape decides, the pop-up stays")
+	modal.Hide()
+}
+
+// The key preview sees keys before the focused widget and shortcuts.
+func TestWindow_KeyPreview(t *testing.T) {
+	w := createWindow("Test")
+	content := &typedShortcutable{}
+	content.SetMinSize(fyne.NewSize(10, 10))
+	w.SetContent(content)
+	repaintWindow(w)
+	w.Canvas().Focus(content)
+
+	var seen []string
+	var preview desktop.KeyPreviewCanvas = w.canvas // (the window's own canvas, not the tests' wrapper)
+	preview.SetOnKeyPreview(func(k fyne.KeyName, m fyne.KeyModifier) bool {
+		seen = append(seen, fmt.Sprint(k, m))
+		return k == fyne.KeyPageDown
+	})
+	w.keyPressed(nil, glfw.KeyPageDown, 0, glfw.Press, glfw.ModControl)
+	w.keyPressed(nil, glfw.KeyPageDown, 0, glfw.Release, glfw.ModControl)
+	w.keyPressed(nil, glfw.KeyPageUp, 0, glfw.Press, glfw.ModControl)
+	w.keyPressed(nil, glfw.KeyPageUp, 0, glfw.Release, glfw.ModControl)
+	assert.Equal(t, []string{fmt.Sprint(fyne.KeyPageDown, fyne.KeyModifierControl), fmt.Sprint(fyne.KeyPageUp, fyne.KeyModifierControl)}, seen)
+	assert.Equal(t, 1, len(content.capturedShortcuts), "only the key the preview left goes on")
 }

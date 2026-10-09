@@ -55,6 +55,23 @@ type dialog struct {
 
 	// allows derived dialogs to inject logic that runs before Show()
 	beforeShowHook func()
+
+	// onEscape is what Escape does (see CustomDialog.SetOnEscape); nil:
+	// what the dismiss button does, if there is one
+	onEscape func()
+}
+
+// escape handles Escape while the dialog is shown.
+func (d *dialog) escape() bool {
+	switch {
+	case d.onEscape != nil:
+		d.onEscape()
+	case d.dismiss != nil:
+		d.Hide() // as the dismiss (Cancel, No, OK) button does
+	default:
+		return false
+	}
+	return true
 }
 
 func (d *dialog) Dismiss() {
@@ -149,6 +166,7 @@ func (d *dialog) create(buttons fyne.CanvasObject) {
 	)
 
 	d.win = widget.NewModalPopUp(content, d.parent.Canvas())
+	d.win.OnEscape = d.escape
 }
 
 func (d *dialog) setButtons(buttons fyne.CanvasObject) {
