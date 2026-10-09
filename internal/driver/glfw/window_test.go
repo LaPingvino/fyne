@@ -2562,3 +2562,21 @@ func TestWindow_KeyPreview(t *testing.T) {
 	assert.Equal(t, []string{fmt.Sprint(fyne.KeyPageDown, fyne.KeyModifierControl), fmt.Sprint(fyne.KeyPageUp, fyne.KeyModifierControl)}, seen)
 	assert.Equal(t, 1, len(content.capturedShortcuts), "only the key the preview left goes on")
 }
+
+// Ctrl+Tab and Ctrl+Shift+Tab leave a widget that keeps Tab.
+func TestWindow_CtrlTabLeavesTabbable(t *testing.T) {
+	w := createWindow("Test")
+	keeper := widget.NewMultiLineEntry() // keeps Tab
+	after := widget.NewEntry()
+	w.SetContent(container.NewVBox(keeper, after))
+	repaintWindow(w)
+
+	w.Canvas().Focus(keeper)
+	w.keyPressed(nil, glfw.KeyTab, 0, glfw.Press, 0)
+	assert.Equal(t, keeper, w.Canvas().Focused(), "Tab stays in the multi-line entry")
+	w.keyPressed(nil, glfw.KeyTab, 0, glfw.Press, glfw.ModControl)
+	assert.Equal(t, after, w.Canvas().Focused(), "Ctrl+Tab leaves it")
+	w.Canvas().Focus(keeper)
+	w.keyPressed(nil, glfw.KeyTab, 0, glfw.Press, glfw.ModControl|glfw.ModShift)
+	assert.Equal(t, after, w.Canvas().Focused(), "Ctrl+Shift+Tab leaves it, backwards (wrapping)")
+}

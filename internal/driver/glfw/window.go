@@ -786,6 +786,20 @@ func (w *window) processKeyPressed(keyName fyne.KeyName, keyASCII fyne.KeyName, 
 		}
 	}
 
+	// Ctrl+Tab and Ctrl+Shift+Tab leave a widget that can keep Tab (a
+	// multi-line entry, an editor): without them the keyboard was stuck in it
+	if keyName == fyne.KeyTab && (keyDesktopModifier == fyne.KeyModifierControl ||
+		keyDesktopModifier == fyne.KeyModifierControl|fyne.KeyModifierShift) {
+		if _, ok := w.canvas.Focused().(fyne.Tabbable); ok {
+			if keyDesktopModifier&fyne.KeyModifierShift != 0 {
+				w.canvas.FocusPrevious()
+			} else {
+				w.canvas.FocusNext()
+			}
+			return
+		}
+	}
+
 	modifierOtherThanShift := (keyDesktopModifier & fyne.KeyModifierControl) |
 		(keyDesktopModifier & fyne.KeyModifierAlt) |
 		(keyDesktopModifier & fyne.KeyModifierSuper)
