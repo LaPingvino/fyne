@@ -43,6 +43,7 @@ require (
 )
 
 require (
+	github.com/LaPingvino/atspi v0.0.0-20261009023205-ced351090bc6 // indirect
 	github.com/akavel/rsrc v0.10.2 // indirect
 	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect

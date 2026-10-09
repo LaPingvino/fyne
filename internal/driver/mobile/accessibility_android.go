@@ -86,7 +86,7 @@ func roleNameToAndroid(role fyne.AccessibleRole) int {
 		return androidRoleTable
 	case fyne.AccessibleRoleText:
 		return androidRoleText
-	case fyne.AccessibleRoleTextField:
+	case fyne.AccessibleRoleTextField, fyne.AccessibleRoleTextArea:
 		return androidRoleTextField
 	case fyne.AccessibleRoleTree:
 		return androidRoleTree

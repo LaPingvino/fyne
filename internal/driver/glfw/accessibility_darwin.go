@@ -79,7 +79,7 @@ func roleToC(role fyne.AccessibleRole) C.AccessibilityRole {
 		return C.AccessibilityRoleTable
 	case fyne.AccessibleRoleText:
 		return C.AccessibilityRoleStaticText
-	case fyne.AccessibleRoleTextField:
+	case fyne.AccessibleRoleTextField, fyne.AccessibleRoleTextArea:
 		return C.AccessibilityRoleTextField
 	case fyne.AccessibleRoleTree:
 		return C.AccessibilityRoleTree

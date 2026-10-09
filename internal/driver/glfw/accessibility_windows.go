@@ -105,7 +105,7 @@ func roleToCWin(role fyne.AccessibleRole) C.WinAccessibilityRole {
 		return C.WinAccessibilityRoleTable
 	case fyne.AccessibleRoleText:
 		return C.WinAccessibilityRoleText
-	case fyne.AccessibleRoleTextField:
+	case fyne.AccessibleRoleTextField, fyne.AccessibleRoleTextArea:
 		return C.WinAccessibilityRoleTextField
 	case fyne.AccessibleRoleTree:
 		return C.WinAccessibilityRoleTree

@@ -78,7 +78,7 @@ func roleNameToIOS(role fyne.AccessibleRole) int {
 		return iosRoleTable
 	case fyne.AccessibleRoleText:
 		return iosRoleText
-	case fyne.AccessibleRoleTextField:
+	case fyne.AccessibleRoleTextField, fyne.AccessibleRoleTextArea:
 		return iosRoleTextField
 	case fyne.AccessibleRoleTree:
 		return iosRoleTree

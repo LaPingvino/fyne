@@ -323,7 +323,68 @@ func (e *Entry) AccessibilityLabel() string {
 //
 // Since: 2.8
 func (e *Entry) AccessibilityRole() fyne.AccessibleRole {
+	if e.MultiLine {
+		return fyne.AccessibleRoleTextArea
+	}
 	return fyne.AccessibleRoleTextField
+}
+
+// AccessibilityText returns the entry's text (concealed for passwords), for
+// a screen reader to read by character, word and line.
+//
+// Since: 2.9
+func (e *Entry) AccessibilityText() string {
+	return e.AccessibilityValue()
+}
+
+// AccessibilityCaret returns where the cursor is, in runes.
+//
+// Since: 2.9
+func (e *Entry) AccessibilityCaret() int {
+	if !e.focused {
+		return -1
+	}
+	return e.CursorTextOffset()
+}
+
+// AccessibilitySelection returns the selected runes [start, end).
+//
+// Since: 2.9
+func (e *Entry) AccessibilitySelection() (int, int) {
+	caret := e.CursorTextOffset()
+	if e.sel == nil || !e.sel.selecting {
+		return caret, caret
+	}
+	anchor := textPosFromRowCol(e.sel.selectRow, e.sel.selectColumn, e.textProvider())
+	return min(caret, anchor), max(caret, anchor)
+}
+
+// AccessibilitySetCaret moves the cursor to offset (in runes).
+//
+// Since: 2.9
+func (e *Entry) AccessibilitySetCaret(offset int) bool {
+	e.CursorRow, e.CursorColumn = e.rowColFromTextPos(min(max(offset, 0), len([]rune(e.Text))))
+	if e.sel != nil {
+		e.sel.selecting = false
+	}
+	e.Refresh()
+	return true
+}
+
+// AccessibilitySetSelection selects the runes [start, end).
+//
+// Since: 2.9
+func (e *Entry) AccessibilitySetSelection(start, end int) bool {
+	n := len([]rune(e.Text))
+	start, end = min(max(start, 0), n), min(max(end, 0), n)
+	if e.sel == nil || start == end {
+		return e.AccessibilitySetCaret(end)
+	}
+	e.sel.selectRow, e.sel.selectColumn = e.rowColFromTextPos(start)
+	e.CursorRow, e.CursorColumn = e.rowColFromTextPos(end)
+	e.sel.selecting = true
+	e.Refresh()
+	return true
 }
 
 // AccessibilityValue returns the entry's text content, concealed for password entries.

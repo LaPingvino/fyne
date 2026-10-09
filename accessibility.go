@@ -24,6 +24,11 @@ const (
 	AccessibleRoleTable       AccessibleRole = "table"
 	AccessibleRoleText        AccessibleRole = "text"
 	AccessibleRoleTextField   AccessibleRole = "textField"
+	// AccessibleRoleTextArea is text edited over several lines (a
+	// multi-line entry, a document editor).
+	//
+	// Since: 2.9
+	AccessibleRoleTextArea AccessibleRole = "textArea"
 	AccessibleRoleTree        AccessibleRole = "tree"
 	AccessibleRoleTreeItem    AccessibleRole = "treeItem"
 )
@@ -124,4 +129,42 @@ type AccessibleActions interface {
 // Since: 2.8
 type AccessibleStates interface {
 	AccessibilityStates() []AccessibleState
+}
+
+// AccessibleText may be implemented by an [Accessible] widget whose text a
+// screen reader should read by character, word and line, following the
+// caret as the user moves it and echoing what is typed: a label's text, an
+// entry's, an editor's. Offsets are in runes.
+//
+// Assistive technologies are told of changes (text typed or deleted, the
+// caret moving) by comparing the values from one refresh to the next.
+//
+// Since: 2.9
+type AccessibleText interface {
+	AccessibilityText() string
+	// AccessibilityCaret is the caret's offset; -1 if there is none.
+	AccessibilityCaret() int
+	// AccessibilitySelection is the selected text [start, end); start and
+	// end are equal when nothing is selected.
+	AccessibilitySelection() (start, end int)
+}
+
+// AccessibleTextLines may be implemented by an [AccessibleText] widget that
+// wraps its text: the offsets at which its lines start as they are shown,
+// the first being 0, so that a screen reader reads the lines the user sees.
+// Without it, lines end at line breaks.
+//
+// Since: 2.9
+type AccessibleTextLines interface {
+	AccessibilityTextLines() []int
+}
+
+// AccessibleTextCaret may be implemented by an [AccessibleText] widget whose
+// caret and selection an assistive technology can move. The methods report
+// whether they did.
+//
+// Since: 2.9
+type AccessibleTextCaret interface {
+	AccessibilitySetCaret(offset int) bool
+	AccessibilitySetSelection(start, end int) bool
 }

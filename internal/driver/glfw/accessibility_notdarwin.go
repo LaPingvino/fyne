@@ -1,4 +1,4 @@
-//go:build !accessibility || (!darwin && !windows)
+//go:build !accessibility || (!darwin && !windows && !linux)
 
 package glfw
 
