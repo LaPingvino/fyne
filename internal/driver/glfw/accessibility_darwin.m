@@ -1,652 +1,414 @@
 //go:build accessibility && darwin
 
-#import "accessibility_darwin.h"
+// NSAccessibility elements for Fyne's accessible objects: what VoiceOver
+// (and braille through it) reads. Go gives a snapshot of every window's
+// objects on the main thread (MacA11yBegin, MacA11yNode, MacA11yEnd); an
+// object keeps its element from one snapshot to the next, so VoiceOver can
+// follow it (and its caret). AppKit asks on the main thread too, and is
+// answered from the snapshot; requests that change something (press,
+// focus, select, set value) are handed to Go.
+//
+// GLFW's content view hides from accessibility: methods added to its class
+// (and its window's) make it the parent of the window's elements, and let
+// it answer for the focus and for hit tests.
+
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>
+#include <stdint.h>
+#include "accessibility_darwin.h"
 
-static NSMutableArray<NSAccessibilityElement*>* globalAccessibilityElements = nil;
-static NSView* targetContentView = nil;
-static NSWindow* targetWindow = nil;
-static IMP originalAccessibilityChildrenIMP = NULL;
-static BOOL contentViewSwizzled = NO;
-static BOOL appAccessibilitySwizzled = NO;
+// Go, for the requests of assistive technologies (accessibility_darwin.go).
+extern void fyneA11yAction(unsigned long long id, int action);
+extern void fyneA11yFocus(unsigned long long id);
+extern void fyneA11ySelect(unsigned long long id, int start, int end);
+extern void fyneA11ySetValue(unsigned long long id, char* value);
 
-@interface AccessibleElement : NSAccessibilityElement
+enum { actionPress, actionIncrement, actionDecrement, actionShowMenu };
 
-@property (nonatomic, assign) AccessibilityRole role;
-@property (nonatomic, strong) NSString* title;
-@property (nonatomic, strong) NSString* label;
-@property (nonatomic, strong) NSString* value;
-@property (nonatomic, assign) NSRect frame;
-@property (nonatomic, assign) NSRect localFrame;
-@property (nonatomic, assign) BOOL enabled;
-@property (nonatomic, assign) BOOL focused;
-@property (nonatomic, assign) BOOL selected;
-@property (nonatomic, assign) BOOL expanded;
-@property (nonatomic, assign) BOOL checked;
-@property (nonatomic, assign) int supportedActions;
-@property (nonatomic, strong) NSMutableArray<AccessibleElement*>* children;
-@property (nonatomic, assign) id parentElement;
-@property (nonatomic, assign) AccessibilityActionCallback actionCallback;
-@property (nonatomic, assign) void* callbackContext;
-@property (nonatomic, assign) AccessibilityContextDestroy contextDestroy;
+@class FyneA11yElement;
 
-@end
+static NSMutableDictionary<NSNumber*, FyneA11yElement*>* elements; // by ID
+static NSMutableDictionary<NSValue*, NSNumber*>* windowIDs;          // NSWindow -> its node's ID
+static NSMutableDictionary<NSNumber*, NSArray<NSNumber*>*>* windowChildren; // window node -> top objects
+static NSMutableSet<NSNumber*>* seen;
+static unsigned long long focusedID;
 
-@implementation AccessibleElement
+static FyneA11yElement* elementFor(NSNumber* n) { return n ? elements[n] : nil; }
 
-- (instancetype)initWithParent:(id)parent {
-    self = [super init];
-    if (self) {
-        _children = [[NSMutableArray alloc] init];
-        _enabled = YES;
-        _focused = NO;
-        _parentElement = parent;
+static NSArray* elementsFor(NSArray<NSNumber*>* ids) {
+    NSMutableArray* out = [NSMutableArray arrayWithCapacity:[ids count]];
+    for (NSNumber* n in ids) {
+        FyneA11yElement* e = elementFor(n);
+        if (e) [out addObject:e];
     }
-    return self;
+    return out;
 }
 
+// the top objects of the window whose content view is view
+static NSArray* topElements(NSView* view) {
+    NSNumber* wid = windowIDs[[NSValue valueWithPointer:[view window]]];
+    return wid ? elementsFor(windowChildren[wid]) : @[];
+}
+
+@interface FyneA11yElement : NSAccessibilityElement {
+@public
+    unsigned long long eid;
+    unsigned long long parentID; // 0 or a window node: the content view
+    NSWindow* window;            // not retained: the window outlives its elements
+    NSString* role;
+    NSString* label;
+    NSString* text;              // nil: no text
+    NSRect local;                // in the content view, top-left origin, points
+    int flags;
+    NSArray<NSNumber*>* childIDs;
+    NSInteger caret, selStart, selEnd;
+    NSArray<NSNumber*>* lines;   // where the shown lines start; nil: at line breaks
+}
+@end
+
+@implementation FyneA11yElement
+
 - (void)dealloc {
-    if (_contextDestroy && _callbackContext) {
-        _contextDestroy(_callbackContext);
-        _callbackContext = NULL;
-    }
-    [_children release];
-    [_title release];
-    [_label release];
-    [_value release];
+    [role release];
+    [label release];
+    [text release];
+    [childIDs release];
+    [lines release];
     [super dealloc];
 }
 
 - (NSAccessibilityRole)accessibilityRole {
-    switch (self.role) {
-        case AccessibilityRoleWindow:
-            return NSAccessibilityWindowRole;
-        case AccessibilityRoleButton:
-            return NSAccessibilityButtonRole;
-        case AccessibilityRoleCheckbox:
-            return NSAccessibilityCheckBoxRole;
-        case AccessibilityRoleHeading:
-        case AccessibilityRoleStaticText:
-            return NSAccessibilityStaticTextRole;
-        case AccessibilityRoleImage:
-            return NSAccessibilityImageRole;
-        case AccessibilityRoleLink:
-            return NSAccessibilityLinkRole;
-        case AccessibilityRoleList:
-            return NSAccessibilityListRole;
-        case AccessibilityRoleListItem:
-        case AccessibilityRoleTreeItem:
-            return NSAccessibilityRowRole;
-        case AccessibilityRoleProgressBar:
-            return NSAccessibilityProgressIndicatorRole;
-        case AccessibilityRoleRadio:
-            return NSAccessibilityRadioButtonRole;
-        case AccessibilityRoleSeparator:
-            return @"AXSeparator";
-        case AccessibilityRoleSlider:
-            return NSAccessibilitySliderRole;
-        case AccessibilityRoleTab:
-            return NSAccessibilityRadioButtonRole;
-        case AccessibilityRoleTabList:
-            return NSAccessibilityTabGroupRole;
-        case AccessibilityRoleTable:
-            return NSAccessibilityTableRole;
-        case AccessibilityRoleTextField:
-            return NSAccessibilityTextFieldRole;
-        case AccessibilityRoleTree:
-            return NSAccessibilityOutlineRole;
-        case AccessibilityRoleContainer:
-        case AccessibilityRoleGroup:
-        default:
-            return NSAccessibilityGroupRole;
-    }
-}
-
-- (NSAccessibilitySubrole)accessibilitySubrole {
-    if (self.role == AccessibilityRoleTab) {
-        return NSAccessibilityTabButtonSubrole;
-    }
-    return [super accessibilitySubrole];
-}
-
-- (NSString*)accessibilityRoleDescription {
-    if (self.role == AccessibilityRoleHeading) {
-        return @"heading";
-    }
-    // The superclass consults our legacy AXRoleDescription attribute, recursing here.
-    return NSAccessibilityRoleDescription([self accessibilityRole], [self accessibilitySubrole]);
-}
-
-- (NSString*)accessibilityLabel {
-    return self.label;
-}
-
-- (NSString*)accessibilityTitle {
-    return self.title;
-}
-
-- (id)accessibilityValue {
-    if (self.role == AccessibilityRoleCheckbox) {
-        return @(self.checked ? 1 : 0);
-    }
-    if (self.role == AccessibilityRoleRadio || self.role == AccessibilityRoleTab) {
-        return @(self.selected ? 1 : 0);
-    }
-    return self.value;
-}
-
-- (NSRect)accessibilityFrame {
-    if (targetWindow && targetContentView) {
-        NSRect contentBounds = [targetContentView bounds];
-        NSPoint contentBottomLeft = NSMakePoint(0, 0);
-        contentBottomLeft = [targetContentView convertPoint:contentBottomLeft toView:nil];
-        contentBottomLeft = [targetWindow convertPointToScreen:contentBottomLeft];
-
-        double localX = self.localFrame.origin.x;
-        double localY = self.localFrame.origin.y;
-        double localWidth = self.localFrame.size.width;
-        double localHeight = self.localFrame.size.height;
-
-        // Convert from Fyne coordinates (top-left origin) to screen coordinates (bottom-left origin)
-        double screenX = contentBottomLeft.x + localX;
-        double screenY = contentBottomLeft.y + (contentBounds.size.height - localY - localHeight);
-
-        return NSMakeRect(screenX, screenY, localWidth, localHeight);
-    }
-
-    return self.frame;
-}
-
-- (id)accessibilityParent {
-    if (self.parentElement) {
-        return self.parentElement;
-    }
-    if (targetContentView) {
-        return targetContentView;
-    }
-    NSWindow* window = [[NSApplication sharedApplication] mainWindow];
-    return [window contentView];
-}
-
-- (id)accessibilityWindow {
-    return targetWindow;
-}
-
-- (id)accessibilityTopLevelUIElement {
-    return targetWindow;
-}
-
-- (NSArray*)accessibilityChildren {
-    return [[self.children copy] autorelease];
-}
-
-- (id)accessibilityHitTest:(NSPoint)point {
-    if (!NSPointInRect(point, [self accessibilityFrame])) {
-        return nil;
-    }
-    // NSAccessibilityElement's default stops at self, even for a tab group.
-    for (AccessibleElement* child in [self.children reverseObjectEnumerator]) {
-        id hit = [child accessibilityHitTest:point];
-        if (hit) {
-            return hit;
-        }
-    }
-    return [self isAccessibilityElement] ? self : nil;
-}
-
-- (BOOL)isAccessibilityEnabled {
-    return self.enabled;
-}
-
-- (BOOL)isAccessibilityFocused {
-    return self.focused;
-}
-
-- (void)setAccessibilityFocused:(BOOL)focused {
-    self.focused = focused;
-}
-
-- (BOOL)isAccessibilitySelected {
-    return self.selected;
-}
-
-- (BOOL)isAccessibilityExpanded {
-    return self.expanded;
-}
-
-- (BOOL)invokeAction:(AccessibilityActionCode)code mask:(int)mask withValue:(const char*)value {
-    if (!self.actionCallback) {
-        return NO;
-    }
-    if ((self.supportedActions & mask) == 0) {
-        return NO;
-    }
-    return self.actionCallback(self.callbackContext, (int)code, value) != 0;
-}
-
-- (BOOL)accessibilityPerformPress {
-    return [self invokeAction:AccessibilityActionPress mask:AccessibilityActionMaskPress withValue:NULL];
-}
-
-- (BOOL)accessibilityPerformIncrement {
-    return [self invokeAction:AccessibilityActionIncrement mask:AccessibilityActionMaskIncrement withValue:NULL];
-}
-
-- (BOOL)accessibilityPerformDecrement {
-    return [self invokeAction:AccessibilityActionDecrement mask:AccessibilityActionMaskDecrement withValue:NULL];
-}
-
-- (BOOL)accessibilityPerformShowMenu {
-    return [self invokeAction:AccessibilityActionShowMenu mask:AccessibilityActionMaskShowMenu withValue:NULL];
-}
-
-- (void)setAccessibilityValue:(id)value {
-    NSString* strValue = nil;
-    if ([value isKindOfClass:[NSString class]]) {
-        strValue = (NSString*)value;
-    } else if ([value respondsToSelector:@selector(stringValue)]) {
-        strValue = [value stringValue];
-    }
-    if (!strValue) {
-        return;
-    }
-    if ([self invokeAction:AccessibilityActionSetValue mask:AccessibilityActionMaskSetValue withValue:[strValue UTF8String]]) {
-        // The next refresh reads the widget's value, which may conceal passwords.
-        NSAccessibilityPostNotification(self, NSAccessibilityValueChangedNotification);
-    }
-}
-
-- (BOOL)isAccessibilityElement {
-    // Containers without children should not appear as a leaf.
-    if ((self.role == AccessibilityRoleContainer || self.role == AccessibilityRoleGroup) &&
-        [self.children count] > 0) {
-        return NO;
-    }
-    return YES;
-}
-
-// Legacy API: ensure elements are not ignored.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-- (BOOL)accessibilityIsIgnored {
-    return ![self isAccessibilityElement];
-}
-
-- (NSArray*)accessibilityAttributeNames {
-    NSMutableArray* attrs = [NSMutableArray arrayWithArray:@[
-        NSAccessibilityRoleAttribute,
-        NSAccessibilityRoleDescriptionAttribute,
-        NSAccessibilityTitleAttribute,
-        NSAccessibilityDescriptionAttribute,
-        NSAccessibilityParentAttribute,
-        NSAccessibilityChildrenAttribute,
-        NSAccessibilityWindowAttribute,
-        NSAccessibilityTopLevelUIElementAttribute,
-        NSAccessibilityPositionAttribute,
-        NSAccessibilitySizeAttribute,
-        NSAccessibilityFocusedAttribute,
-        NSAccessibilityEnabledAttribute,
-    ]];
-    if (self.value || self.role == AccessibilityRoleCheckbox ||
-        self.role == AccessibilityRoleRadio || self.role == AccessibilityRoleTab) {
-        [attrs addObject:NSAccessibilityValueAttribute];
-    }
-    return attrs;
-}
-
-- (id)accessibilityAttributeValue:(NSString*)attr {
-    if ([attr isEqualToString:NSAccessibilityRoleAttribute]) {
-        return [self accessibilityRole];
-    }
-    if ([attr isEqualToString:NSAccessibilityRoleDescriptionAttribute]) {
-        return [self accessibilityRoleDescription];
-    }
-    if ([attr isEqualToString:NSAccessibilityTitleAttribute]) {
-        return self.title;
-    }
-    if ([attr isEqualToString:NSAccessibilityDescriptionAttribute]) {
-        return self.label;
-    }
-    if ([attr isEqualToString:NSAccessibilityValueAttribute]) {
-        return [self accessibilityValue];
-    }
-    if ([attr isEqualToString:NSAccessibilityChildrenAttribute]) {
-        return NSAccessibilityUnignoredChildren([self accessibilityChildren]);
-    }
-    if ([attr isEqualToString:NSAccessibilityParentAttribute]) {
-        return NSAccessibilityUnignoredAncestor([self accessibilityParent]);
-    }
-    if ([attr isEqualToString:NSAccessibilityWindowAttribute]) {
-        return targetWindow;
-    }
-    if ([attr isEqualToString:NSAccessibilityTopLevelUIElementAttribute]) {
-        return targetWindow;
-    }
-    if ([attr isEqualToString:NSAccessibilityPositionAttribute]) {
-        NSRect frame = [self accessibilityFrame];
-        return [NSValue valueWithPoint:frame.origin];
-    }
-    if ([attr isEqualToString:NSAccessibilitySizeAttribute]) {
-        NSRect frame = [self accessibilityFrame];
-        return [NSValue valueWithSize:frame.size];
-    }
-    if ([attr isEqualToString:NSAccessibilityFocusedAttribute]) {
-        return @(self.focused);
-    }
-    if ([attr isEqualToString:NSAccessibilityEnabledAttribute]) {
-        return @(self.enabled);
-    }
-    return [super accessibilityAttributeValue:attr];
-}
-#pragma clang diagnostic pop
-
-@end
-
-static NSArray* customAccessibilityChildren(id self, SEL _cmd) {
-    if (globalAccessibilityElements && [globalAccessibilityElements count] > 0) {
-        return [[globalAccessibilityElements copy] autorelease];
-    }
-    if (originalAccessibilityChildrenIMP) {
-        return ((NSArray*(*)(id, SEL))originalAccessibilityChildrenIMP)(self, _cmd);
-    }
-    return @[];
-}
-
-// Swizzled methods for GLFWContentView to fix accessibility hierarchy.
-// GLFWContentView reports AXUnknown role and isAccessibilityElement=NO by
-// default, which breaks the AX chain from window → content → elements.
-static NSAccessibilityRole customAccessibilityRole(id self, SEL _cmd) {
+    if ([role isEqualToString:@"button"]) return NSAccessibilityButtonRole;
+    if ([role isEqualToString:@"checkbox"]) return NSAccessibilityCheckBoxRole;
+    if ([role isEqualToString:@"heading"] || [role isEqualToString:@"text"]) return NSAccessibilityStaticTextRole;
+    if ([role isEqualToString:@"image"]) return NSAccessibilityImageRole;
+    if ([role isEqualToString:@"link"]) return NSAccessibilityLinkRole;
+    if ([role isEqualToString:@"list"]) return NSAccessibilityListRole;
+    if ([role isEqualToString:@"listItem"] || [role isEqualToString:@"treeItem"]) return NSAccessibilityRowRole;
+    if ([role isEqualToString:@"progressBar"]) return NSAccessibilityProgressIndicatorRole;
+    if ([role isEqualToString:@"radio"] || [role isEqualToString:@"tab"]) return NSAccessibilityRadioButtonRole;
+    if ([role isEqualToString:@"separator"]) return @"AXSeparator";
+    if ([role isEqualToString:@"slider"]) return NSAccessibilitySliderRole;
+    if ([role isEqualToString:@"tabList"]) return NSAccessibilityTabGroupRole;
+    if ([role isEqualToString:@"table"]) return NSAccessibilityTableRole;
+    if ([role isEqualToString:@"textField"]) return NSAccessibilityTextFieldRole;
+    if ([role isEqualToString:@"textArea"]) return NSAccessibilityTextAreaRole;
+    if ([role isEqualToString:@"tree"]) return NSAccessibilityOutlineRole;
     return NSAccessibilityGroupRole;
 }
 
-static BOOL customIsAccessibilityElement(id self, SEL _cmd) {
+- (NSAccessibilitySubrole)accessibilitySubrole {
+    if ([role isEqualToString:@"tab"]) return NSAccessibilityTabButtonSubrole;
+    return nil;
+}
+
+- (NSString*)accessibilityRoleDescription {
+    if ([role isEqualToString:@"heading"]) return @"heading";
+    return NSAccessibilityRoleDescription([self accessibilityRole], [self accessibilitySubrole]);
+}
+
+- (NSString*)accessibilityLabel { return label; }
+- (NSString*)accessibilityTitle { return nil; } // the label says it (VoiceOver would say it twice)
+
+- (id)accessibilityValue {
+    if ([role isEqualToString:@"checkbox"]) return @((flags & MacA11yChecked) ? 1 : 0);
+    if ([role isEqualToString:@"radio"] || [role isEqualToString:@"tab"]) return @((flags & MacA11ySelected) ? 1 : 0);
+    return text;
+}
+
+- (void)setAccessibilityValue:(id)value {
+    NSString* s = [value isKindOfClass:[NSString class]] ? value :
+        ([value respondsToSelector:@selector(stringValue)] ? [value stringValue] : nil);
+    if (s && (flags & MacA11ySetValue)) fyneA11ySetValue(eid, (char*)[s UTF8String]);
+}
+
+// screen points, bottom-left origin, from the content view's top-left ones
+- (NSRect)frameOf:(NSRect)r {
+    NSView* view = [window contentView];
+    if (!view) return NSZeroRect;
+    NSRect inWindow = [view convertRect:NSMakeRect(r.origin.x, [view bounds].size.height - r.origin.y - r.size.height,
+                                                   r.size.width, r.size.height)
+                                 toView:nil];
+    return [window convertRectToScreen:inWindow];
+}
+
+- (NSRect)accessibilityFrame { return [self frameOf:local]; }
+
+- (id)accessibilityParent {
+    FyneA11yElement* p = elementFor(@(parentID));
+    return p ? (id)p : (id)[window contentView];
+}
+- (id)accessibilityWindow { return window; }
+- (id)accessibilityTopLevelUIElement { return window; }
+- (NSArray*)accessibilityChildren { return elementsFor(childIDs); }
+
+- (id)accessibilityHitTest:(NSPoint)point {
+    if (!NSPointInRect(point, [self accessibilityFrame])) return nil;
+    for (FyneA11yElement* c in [elementsFor(childIDs) reverseObjectEnumerator]) {
+        id hit = [c accessibilityHitTest:point];
+        if (hit) return hit;
+    }
+    return self;
+}
+
+- (BOOL)isAccessibilityElement { return YES; }
+- (BOOL)isAccessibilityEnabled { return !(flags & MacA11yDisabled); }
+- (BOOL)isAccessibilityFocused { return focusedID == eid; }
+- (void)setAccessibilityFocused:(BOOL)focused {
+    if (focused && (flags & MacA11yFocusable)) fyneA11yFocus(eid);
+}
+- (BOOL)isAccessibilitySelected { return (flags & MacA11ySelected) != 0; }
+- (BOOL)isAccessibilityExpanded { return (flags & MacA11yExpanded) != 0; }
+
+- (BOOL)accessibilityPerformPress {
+    if (!(flags & MacA11yPress)) return NO;
+    fyneA11yAction(eid, actionPress);
+    return YES;
+}
+- (BOOL)accessibilityPerformIncrement {
+    if (!(flags & MacA11yIncrement)) return NO;
+    fyneA11yAction(eid, actionIncrement);
+    return YES;
+}
+- (BOOL)accessibilityPerformDecrement {
+    if (!(flags & MacA11yDecrement)) return NO;
+    fyneA11yAction(eid, actionDecrement);
+    return YES;
+}
+- (BOOL)accessibilityPerformShowMenu {
+    if (!(flags & MacA11yShowMenu)) return NO;
+    fyneA11yAction(eid, actionShowMenu);
     return YES;
 }
 
-static BOOL customAccessibilityIsNotIgnored(id self, SEL _cmd) {
-    return NO;
+// ---- text (NSAccessibility's parameterized attributes) ----
+
+- (NSArray<NSNumber*>*)lineStarts {
+    if (lines) return lines;
+    NSMutableArray* starts = [NSMutableArray arrayWithObject:@0];
+    NSUInteger n = [text length];
+    for (NSUInteger i = 1; i < n; i++)
+        if ([text characterAtIndex:i - 1] == '\n') [starts addObject:@(i)];
+    return starts;
 }
 
-// GLFWWindow needs to return its content view as a child.
-// Without this, the window appears empty in the AX hierarchy.
-static NSArray* customWindowAccessibilityChildren(id self, SEL _cmd) {
-    NSWindow* window = (NSWindow*)self;
-    NSView* cv = [window contentView];
-    if (cv) {
-        return @[cv];
-    }
-    return @[];
+- (NSRange)clamp:(NSRange)r {
+    NSUInteger n = [text length];
+    NSUInteger loc = MIN(r.location, n);
+    return NSMakeRange(loc, MIN(r.length, n - loc));
 }
 
-static void swizzleContentViewAccessibility(NSView* contentView) {
-    if (contentViewSwizzled) {
-        return;
+- (NSInteger)accessibilityNumberOfCharacters { return [text length]; }
+
+- (NSRange)accessibilitySelectedTextRange {
+    if (selStart != selEnd) return [self clamp:NSMakeRange(MIN(selStart, selEnd), labs(selEnd - selStart))];
+    return [self clamp:NSMakeRange(caret >= 0 ? caret : 0, 0)];
+}
+- (void)setAccessibilitySelectedTextRange:(NSRange)range {
+    fyneA11ySelect(eid, (int)range.location, (int)(range.location + range.length));
+}
+- (NSString*)accessibilitySelectedText {
+    return text ? [text substringWithRange:[self accessibilitySelectedTextRange]] : nil;
+}
+- (NSRange)accessibilityVisibleCharacterRange { return NSMakeRange(0, [text length]); }
+
+- (NSInteger)accessibilityLineForIndex:(NSInteger)index {
+    NSArray<NSNumber*>* starts = [self lineStarts];
+    NSInteger line = 0;
+    for (NSUInteger i = 0; i < [starts count]; i++)
+        if ([starts[i] integerValue] <= index) line = i;
+    return line;
+}
+- (NSInteger)accessibilityInsertionPointLineNumber {
+    return [self accessibilityLineForIndex:[self accessibilitySelectedTextRange].location];
+}
+- (NSRange)accessibilityRangeForLine:(NSInteger)line {
+    NSArray<NSNumber*>* starts = [self lineStarts];
+    if (line < 0 || line >= (NSInteger)[starts count]) return NSMakeRange(NSNotFound, 0);
+    NSInteger start = [starts[line] integerValue];
+    NSInteger end = line + 1 < (NSInteger)[starts count] ? [starts[line + 1] integerValue] : (NSInteger)[text length];
+    return [self clamp:NSMakeRange(start, MAX(end - start, 0))];
+}
+- (NSString*)accessibilityStringForRange:(NSRange)range {
+    return text ? [text substringWithRange:[self clamp:range]] : nil;
+}
+- (NSAttributedString*)accessibilityAttributedStringForRange:(NSRange)range {
+    NSString* s = [self accessibilityStringForRange:range];
+    return s ? [[[NSAttributedString alloc] initWithString:s] autorelease] : nil;
+}
+- (NSRange)accessibilityRangeForIndex:(NSInteger)index {
+    if (!text || index < 0 || index >= (NSInteger)[text length]) return NSMakeRange(index, 0);
+    return [text rangeOfComposedCharacterSequenceAtIndex:index];
+}
+- (NSRange)accessibilityStyleRangeForIndex:(NSInteger)index { return NSMakeRange(0, [text length]); }
+- (NSRange)accessibilityRangeForPosition:(NSPoint)point { return NSMakeRange(0, 0); }
+- (NSRect)accessibilityFrameForRange:(NSRange)range { return [self accessibilityFrame]; }
+
+@end
+
+// ---- GLFW's content view and window ----
+
+static NSArray* viewChildren(id self, SEL _cmd) { return topElements(self); }
+static NSAccessibilityRole viewRole(id self, SEL _cmd) { return NSAccessibilityGroupRole; }
+static BOOL viewIsElement(id self, SEL _cmd) { return YES; }
+static id viewFocused(id self, SEL _cmd) {
+    FyneA11yElement* f = focusedID ? elementFor(@(focusedID)) : nil;
+    return (f && f->window == [self window]) ? (id)f : self;
+}
+static id viewHitTest(id self, SEL _cmd, NSPoint point) {
+    for (FyneA11yElement* e in [topElements(self) reverseObjectEnumerator]) {
+        id hit = [e accessibilityHitTest:point];
+        if (hit) return hit;
     }
-    contentViewSwizzled = YES;
-
-    Class viewClass = [contentView class];
-
-    class_addMethod(viewClass, @selector(accessibilityRole),
-                    (IMP)customAccessibilityRole, "@@:");
-    class_addMethod(viewClass, @selector(isAccessibilityElement),
-                    (IMP)customIsAccessibilityElement, "B@:");
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    class_addMethod(viewClass, @selector(accessibilityIsIgnored),
-                    (IMP)customAccessibilityIsNotIgnored, "B@:");
-#pragma clang diagnostic pop
+    return self;
+}
+static NSArray* windowAXChildren(id self, SEL _cmd) {
+    NSView* cv = [(NSWindow*)self contentView];
+    return cv ? @[cv] : @[];
 }
 
-static void swizzleAppAccessibility(void) {
-    if (appAccessibilitySwizzled) {
-        return;
+// hookWindow gives the classes of window and of its content view the
+// methods above, once per class. class_replaceMethod adds them to that
+// class only (NSView's and NSWindow's own stay as they are).
+static void hookWindow(NSWindow* window) {
+    static NSMutableSet* hooked;
+    if (!hooked) hooked = [[NSMutableSet alloc] init];
+    NSView* view = [window contentView];
+    if (view && ![hooked containsObject:[view class]]) {
+        Class c = [view class];
+        [hooked addObject:c];
+        class_replaceMethod(c, @selector(accessibilityChildren), (IMP)viewChildren, "@@:");
+        class_replaceMethod(c, @selector(accessibilityRole), (IMP)viewRole, "@@:");
+        class_replaceMethod(c, @selector(isAccessibilityElement), (IMP)viewIsElement, "B@:");
+        class_replaceMethod(c, @selector(accessibilityFocusedUIElement), (IMP)viewFocused, "@@:");
+        class_replaceMethod(c, @selector(accessibilityHitTest:), (IMP)viewHitTest, "@@:{CGPoint=dd}");
     }
-    appAccessibilitySwizzled = YES;
-
-    if (targetWindow) {
-        Class winClass = [targetWindow class];
-        class_addMethod(winClass, @selector(accessibilityChildren),
-                        (IMP)customWindowAccessibilityChildren, "@@:");
+    if (![hooked containsObject:[window class]]) {
+        Class c = [window class];
+        [hooked addObject:c];
+        class_replaceMethod(c, @selector(accessibilityChildren), (IMP)windowAXChildren, "@@:");
     }
 }
 
-AccessibilityElementRef AccessibilityElementCreate(
-    AccessibilityRole role,
-    const char* title,
-    const char* label,
-    double x, double y, double width, double height,
-    AccessibilityElementRef parent,
-    AccessibilityActionCallback callback,
-    void* callbackContext,
-    AccessibilityContextDestroy contextDestroy
-) {
+// ---- the API for Go ----
+
+void MacA11yBegin(void) {
+    if (!elements) {
+        elements = [[NSMutableDictionary alloc] init];
+        windowIDs = [[NSMutableDictionary alloc] init];
+        windowChildren = [[NSMutableDictionary alloc] init];
+        seen = [[NSMutableSet alloc] init];
+    }
+    [seen removeAllObjects];
+}
+
+static NSArray<NSNumber*>* numbers(const unsigned long long* v, int n) {
+    NSMutableArray* out = [NSMutableArray arrayWithCapacity:n];
+    for (int i = 0; i < n; i++) [out addObject:@(v[i])];
+    return out;
+}
+
+static void layoutChanged(id of) {
+    if (of) NSAccessibilityPostNotification(of, NSAccessibilityLayoutChangedNotification);
+}
+
+void MacA11yNode(unsigned long long id, unsigned long long parent, unsigned long long nsWindow,
+    const char* role, const char* name, double x, double y, double width, double height, int flags,
+    const unsigned long long* children, int childCount,
+    const char* text, int caret, int selStart, int selEnd, const int* lines, int lineCount) {
     @autoreleasepool {
-        if (!globalAccessibilityElements) {
-            globalAccessibilityElements = [[NSMutableArray alloc] init];
-        }
+        NSWindow* window = (NSWindow*)(uintptr_t)nsWindow;
+        NSNumber* key = @(id);
+        NSArray<NSNumber*>* kids = numbers(children, childCount);
+        [seen addObject:key];
 
-        AccessibleElement* elem = [[AccessibleElement alloc] initWithParent:parent];
-        elem.role = role;
-        elem.title = title ? [NSString stringWithUTF8String:title] : @"";
-        elem.label = label ? [NSString stringWithUTF8String:label] : @"";
-
-        // Store local frame (relative to window content view)
-        elem.localFrame = CGRectMake(x, y, width, height);
-        elem.frame = elem.localFrame; // Will be recalculated dynamically in accessibilityFrame
-
-        elem.actionCallback = callback;
-        elem.callbackContext = callbackContext;
-        elem.contextDestroy = contextDestroy;
-
-        return (void*)elem;
-    }
-}
-
-void AccessibilityElementSetFrame(AccessibilityElementRef elem, double x, double y, double width, double height) {
-    @autoreleasepool {
-        AccessibleElement* element = (__bridge AccessibleElement*)elem;
-        element.frame = NSMakeRect(x, y, width, height);
-        NSAccessibilityPostNotification(element, NSAccessibilityMovedNotification);
-        NSAccessibilityPostNotification(element, NSAccessibilityResizedNotification);
-    }
-}
-
-void AccessibilityElementSetTitle(AccessibilityElementRef elem, const char* title) {
-    @autoreleasepool {
-        AccessibleElement* element = (__bridge AccessibleElement*)elem;
-        element.title = title ? [NSString stringWithUTF8String:title] : @"";
-    }
-}
-
-void AccessibilityElementSetLabel(AccessibilityElementRef elem, const char* label) {
-    @autoreleasepool {
-        AccessibleElement* element = (__bridge AccessibleElement*)elem;
-        element.label = label ? [NSString stringWithUTF8String:label] : @"";
-    }
-}
-
-void AccessibilityElementSetValue(AccessibilityElementRef elem, const char* value) {
-    @autoreleasepool {
-        AccessibleElement* element = (__bridge AccessibleElement*)elem;
-        element.value = value ? [NSString stringWithUTF8String:value] : @"";
-        NSAccessibilityPostNotification(element, NSAccessibilityValueChangedNotification);
-    }
-}
-
-void AccessibilityElementSetEnabled(AccessibilityElementRef elem, int enabled) {
-    @autoreleasepool {
-        AccessibleElement* element = (__bridge AccessibleElement*)elem;
-        element.enabled = enabled != 0;
-    }
-}
-
-void AccessibilityElementSetFocused(AccessibilityElementRef elem, int focused) {
-    @autoreleasepool {
-        AccessibleElement* element = (__bridge AccessibleElement*)elem;
-        element.focused = focused != 0;
-        if (focused) {
-            NSAccessibilityPostNotification(element, NSAccessibilityFocusedUIElementChangedNotification);
-        }
-    }
-}
-
-void AccessibilityElementSetStates(AccessibilityElementRef elem, int stateMask) {
-    @autoreleasepool {
-        AccessibleElement* element = (__bridge AccessibleElement*)elem;
-        BOOL wasSelected = element.selected;
-        BOOL wasExpanded = element.expanded;
-
-        element.checked  = (stateMask & AccessibilityStateMaskChecked)  != 0;
-        element.enabled  = (stateMask & AccessibilityStateMaskDisabled) == 0;
-        element.expanded = (stateMask & AccessibilityStateMaskExpanded) != 0;
-        element.focused  = (stateMask & AccessibilityStateMaskFocused)  != 0;
-        element.selected = (stateMask & AccessibilityStateMaskSelected) != 0;
-
-        if (wasSelected != element.selected) {
-            NSAccessibilityPostNotification(element, NSAccessibilitySelectedChildrenChangedNotification);
-        }
-        if (wasExpanded != element.expanded) {
-            NSAccessibilityPostNotification(element, NSAccessibilityRowExpandedNotification);
-        }
-    }
-}
-
-void AccessibilityElementSetSupportedActions(AccessibilityElementRef elem, int actionMask) {
-    @autoreleasepool {
-        AccessibleElement* element = (__bridge AccessibleElement*)elem;
-        element.supportedActions = actionMask;
-    }
-}
-
-void AccessibilityElementAddChild(AccessibilityElementRef parent, AccessibilityElementRef child) {
-    @autoreleasepool {
-        if (!parent || !child) {
-            return;
-        }
-
-        AccessibleElement* parentElem = (__bridge AccessibleElement*)parent;
-        AccessibleElement* childElem = (__bridge AccessibleElement*)child;
-
-        if (!parentElem || !childElem || !parentElem.children) {
-            return;
-        }
-
-        if (![parentElem.children containsObject:childElem]) {
-            [parentElem.children addObject:childElem];
-            childElem.parentElement = parentElem;
-            [childElem release]; // Transfer create ownership to the parent.
-            NSAccessibilityPostNotification(parentElem, NSAccessibilityLayoutChangedNotification);
-        }
-    }
-}
-
-void AccessibilityElementRemoveChild(AccessibilityElementRef parent, AccessibilityElementRef child) {
-    @autoreleasepool {
-        AccessibleElement* parentElem = (__bridge AccessibleElement*)parent;
-        AccessibleElement* childElem = (__bridge AccessibleElement*)child;
-        childElem.parentElement = nil;
-        [parentElem.children removeObject:childElem];
-        if (parentElem) {
-            NSAccessibilityPostNotification(parentElem, NSAccessibilityLayoutChangedNotification);
-        }
-    }
-}
-
-void AccessibilityElementSetParent(AccessibilityElementRef child, AccessibilityElementRef parent) {
-    @autoreleasepool {
-        AccessibleElement* childElem = (__bridge AccessibleElement*)child;
-        AccessibleElement* parentElem = (__bridge AccessibleElement*)parent;
-        childElem.parentElement = parentElem;
-    }
-}
-
-void AccessibilitySetTargetWindow(void* nsWindow) {
-    @autoreleasepool {
-        targetWindow = (NSWindow*)nsWindow;
-        if (targetWindow) {
-            targetContentView = [targetWindow contentView];
-
-            if (targetContentView) {
-                swizzleContentViewAccessibility(targetContentView);
+        if (strcmp(role, "window") == 0) {
+            if (window) hookWindow(window);
+            windowIDs[[NSValue valueWithPointer:window]] = key;
+            if (![windowChildren[key] isEqualToArray:kids]) {
+                windowChildren[key] = kids;
+                layoutChanged([window contentView]);
             }
-            swizzleAppAccessibility();
-        }
-    }
-}
-
-void AccessibilityAttachToWindow(AccessibilityElementRef elem) {
-    @autoreleasepool {
-        AccessibleElement* element = (AccessibleElement*)elem;
-
-        if (!globalAccessibilityElements) {
-            globalAccessibilityElements = [[NSMutableArray alloc] init];
-        }
-
-        NSWindow* window = targetWindow;
-        if (!window) {
             return;
         }
 
-        NSView* contentView = targetContentView;
-        if (!contentView) {
-            return;
+        FyneA11yElement* e = elements[key];
+        BOOL isNew = e == nil;
+        if (isNew) {
+            e = [[[FyneA11yElement alloc] init] autorelease];
+            e->eid = id;
+            elements[key] = e;
         }
-
-        targetContentView = contentView;
-
-        if (!originalAccessibilityChildrenIMP) {
-            Class viewClass = [contentView class];
-            SEL selector = @selector(accessibilityChildren);
-            Method originalMethod = class_getInstanceMethod(viewClass, selector);
-            if (originalMethod) {
-                originalAccessibilityChildrenIMP = method_getImplementation(originalMethod);
-                // Use class_addMethod to add ONLY to GLFWContentView.
-                // The original code used method_setImplementation which modified
-                // the parent class (NSView/NSResponder), breaking ALL views
-                // including NSWindow's accessibility hierarchy.
-                class_addMethod(viewClass, selector,
-                                (IMP)customAccessibilityChildren, "@@:");
-            }
+        e->parentID = parent;
+        e->window = window;
+        [e->role release];
+        e->role = [[NSString alloc] initWithUTF8String:role];
+        [e->label release];
+        e->label = [[NSString alloc] initWithUTF8String:name ? name : ""];
+        e->local = NSMakeRect(x, y, width, height);
+        e->flags = flags;
+        BOOL kidsChanged = !isNew && ![e->childIDs isEqualToArray:kids];
+        [e->childIDs release];
+        e->childIDs = [kids retain];
+        [e->text release];
+        e->text = text ? [[NSString alloc] initWithUTF8String:text] : nil;
+        e->caret = caret;
+        e->selStart = selStart;
+        e->selEnd = selEnd;
+        [e->lines release];
+        e->lines = nil;
+        if (lines && lineCount > 0) {
+            NSMutableArray* l = [NSMutableArray arrayWithCapacity:lineCount];
+            for (int i = 0; i < lineCount; i++) [l addObject:@(lines[i])];
+            e->lines = [l retain];
         }
-
-        element.parentElement = contentView;
-
-        if (![globalAccessibilityElements containsObject:element]) {
-            [globalAccessibilityElements addObject:element];
-        }
-
-        NSAccessibilityPostNotification(contentView, NSAccessibilityCreatedNotification);
-        NSAccessibilityPostNotification(element, NSAccessibilityCreatedNotification);
+        if (isNew) NSAccessibilityPostNotification(e, NSAccessibilityCreatedNotification);
+        if (kidsChanged) layoutChanged(e);
     }
 }
 
-void AccessibilityPostNotification(AccessibilityElementRef elem, const char* notification) {
+void MacA11yEnd(void) {
     @autoreleasepool {
-        AccessibleElement* element = (__bridge AccessibleElement*)elem;
-        NSString* notificationName = notification ? [NSString stringWithUTF8String:notification] : nil;
-        if (notificationName) {
-            NSAccessibilityPostNotification(element, notificationName);
+        for (NSNumber* key in [elements allKeys]) {
+            if ([seen containsObject:key]) continue;
+            FyneA11yElement* e = [[elements[key] retain] autorelease];
+            [elements removeObjectForKey:key];
+            NSAccessibilityPostNotification(e, NSAccessibilityUIElementDestroyedNotification);
+            if (e->eid == focusedID) focusedID = 0;
+        }
+        for (NSNumber* key in [windowChildren allKeys]) {
+            if (![seen containsObject:key]) [windowChildren removeObjectForKey:key];
         }
     }
 }
 
-void AccessibilityElementDestroy(AccessibilityElementRef elem) {
+void MacA11yFocus(unsigned long long id) {
     @autoreleasepool {
-        if (!elem) return;
-
-        AccessibleElement* element = (AccessibleElement*)elem;
-        if (globalAccessibilityElements) {
-            [globalAccessibilityElements removeObject:element];
-        }
-        if ([element.parentElement isKindOfClass:[AccessibleElement class]]) {
-            AccessibleElement* parent = (AccessibleElement*)element.parentElement;
-            element.parentElement = nil;
-            [parent.children removeObject:element];
-            return;
-        }
-        element.parentElement = nil;
-        [element release];
+        focusedID = id;
+        FyneA11yElement* e = elementFor(@(id));
+        if (e) NSAccessibilityPostNotification(e, NSAccessibilityFocusedUIElementChangedNotification);
     }
 }
+
+void MacA11yTextChanged(unsigned long long id) {
+    @autoreleasepool {
+        FyneA11yElement* e = elementFor(@(id));
+        if (e) NSAccessibilityPostNotification(e, NSAccessibilityValueChangedNotification);
+    }
+}
+
+// (the caret moving too: VoiceOver reads and brailles from it)
+void MacA11ySelectionChanged(unsigned long long id) {
+    @autoreleasepool {
+        FyneA11yElement* e = elementFor(@(id));
+        if (e) NSAccessibilityPostNotification(e, NSAccessibilitySelectedTextChangedNotification);
+    }
+}
+
+void MacA11yForgetWindow(unsigned long long nsWindow) {
+    @autoreleasepool {
+        [windowIDs removeObjectForKey:[NSValue valueWithPointer:(void*)(uintptr_t)nsWindow]];
+    }
+}
+
+void* MacA11yElement(unsigned long long id) { return (void*)elementFor(@(id)); }

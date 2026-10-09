@@ -1,4 +1,4 @@
-//go:build accessibility && linux
+//go:build accessibility && (linux || windows || darwin)
 
 package glfw
 
@@ -55,4 +55,14 @@ func TestSortByPosition(t *testing.T) {
 	}
 	sortByPosition(nodes)
 	assert.Equal(t, []uint64{5, 3, 2, 4}, nodes[0].Children)
+}
+
+// UTF-16 offsets (Windows, macOS) and back: é is one unit, 😀 two.
+func TestUTF16Offsets(t *testing.T) {
+	s := "café 😀 x"
+	at := utf16Offsets(s)
+	assert.Equal(t, []int{0, 3, 4, 5, 7, 8, 9}, []int{at(0), at(3), at(4), at(5), at(6), at(7), at(8)})
+	for runes := 0; runes <= 8; runes++ {
+		assert.Equal(t, runes, runeOffset(s, at(runes)), "rune %d", runes)
+	}
 }

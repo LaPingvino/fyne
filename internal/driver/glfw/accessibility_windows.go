@@ -12,7 +12,6 @@ import "C"
 
 import (
 	"slices"
-	"unicode/utf16"
 	"unsafe"
 
 	"fyne.io/fyne/v2"
@@ -120,31 +119,6 @@ func (winPlatform) TextDeleted(id uint64, _ int, _ string)  { C.WinA11yTextChang
 func (winPlatform) CaretMoved(id uint64, _ int) { C.WinA11ySelectionChanged(C.ulonglong(id)) }
 func (winPlatform) SelectionChanged(id uint64)  { C.WinA11ySelectionChanged(C.ulonglong(id)) }
 func (winPlatform) ForgetWindow(handle uintptr) { C.WinA11yForgetWindow(C.ulonglong(handle)) }
-
-// utf16Offsets converts rune offsets in s to UTF-16 offsets.
-func utf16Offsets(s string) func(int) int {
-	at := make([]int, 0, len(s)+1)
-	n := 0
-	for _, r := range s {
-		at = append(at, n)
-		n += utf16.RuneLen(r)
-	}
-	at = append(at, n)
-	return func(runes int) int { return at[min(max(runes, 0), len(at)-1)] }
-}
-
-// runeOffset converts a UTF-16 offset in s to runes.
-func runeOffset(s string, units int) int {
-	n, i := 0, 0
-	for _, r := range s {
-		if n >= units {
-			return i
-		}
-		n += utf16.RuneLen(r)
-		i++
-	}
-	return i
-}
 
 // The requests of assistive technologies, from UI Automation's threads.
 

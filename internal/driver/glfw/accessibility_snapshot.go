@@ -1,4 +1,4 @@
-//go:build accessibility && (linux || windows)
+//go:build accessibility && (linux || windows || darwin)
 
 package glfw
 
@@ -413,4 +413,38 @@ func (w *window) cleanupAccessibilityForWindow() {
 	if w.view() != nil {
 		a11y.platform.ForgetWindow(a11yWindowHandle(w))
 	}
+}
+
+// utf16Offsets converts rune offsets in s to UTF-16 offsets.
+func utf16Offsets(s string) func(int) int {
+	at := make([]int, 0, len(s)+1)
+	n := 0
+	for _, r := range s {
+		at = append(at, n)
+		n += utf16Len(r)
+	}
+	at = append(at, n)
+	return func(runes int) int { return at[min(max(runes, 0), len(at)-1)] }
+}
+
+// runeOffset converts a UTF-16 offset in s to runes.
+func runeOffset(s string, units int) int {
+	n, i := 0, 0
+	for _, r := range s {
+		if n >= units {
+			return i
+		}
+		n += utf16Len(r)
+		i++
+	}
+	return i
+}
+
+// utf16Len is how many UTF-16 code units r takes (two above the Basic
+// Multilingual Plane).
+func utf16Len(r rune) int {
+	if r >= 0x10000 {
+		return 2
+	}
+	return 1
 }

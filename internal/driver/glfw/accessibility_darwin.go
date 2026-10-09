@@ -6,345 +6,156 @@ package glfw
 #cgo CFLAGS: -x objective-c
 #cgo LDFLAGS: -framework Foundation -framework AppKit -framework ApplicationServices
 
-#include <stdbool.h>
 #include <stdlib.h>
 #include "accessibility_darwin.h"
-
-extern int fyneAccessibilityPerformAction(void* ctx, int actionCode, char* setValueArg);
-extern void fyneAccessibilityDestroyContext(void* ctx);
-
-// Static trampolines: cgo cannot take the address of an exported Go function
-// directly through `C.f` syntax, so wrap each export in a C function and
-// expose the function pointer via accessor helpers below.
-static int actionTrampoline(void* ctx, int actionCode, const char* setValueArg) {
-    return fyneAccessibilityPerformAction(ctx, actionCode, (char*)setValueArg);
-}
-
-static void destroyTrampoline(void* ctx) {
-    fyneAccessibilityDestroyContext(ctx);
-}
-
-static AccessibilityActionCallback getActionCallback(void) {
-    return actionTrampoline;
-}
-
-static AccessibilityContextDestroy getDestroyCallback(void) {
-    return destroyTrampoline;
-}
 */
 import "C"
 
 import (
-	"runtime/cgo"
+	"slices"
 	"unsafe"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/internal/driver/common"
-	"fyne.io/fyne/v2/internal/scale"
 )
 
-var accessibilityElements = make(map[*window][]C.AccessibilityElementRef)
+// The macOS bridge: the snapshots (accessibility_snapshot.go) as
+// NSAccessibility elements (accessibility_darwin.m), for VoiceOver and
+// braille through it. NSString counts text in UTF-16 code units; Fyne in
+// runes: offsets are converted both ways here.
 
-func roleToC(role fyne.AccessibleRole) C.AccessibilityRole {
-	switch role {
-	case fyne.AccessibleRoleButton:
-		return C.AccessibilityRoleButton
-	case fyne.AccessibleRoleCheckbox:
-		return C.AccessibilityRoleCheckbox
-	case fyne.AccessibleRoleContainer:
-		return C.AccessibilityRoleContainer
-	case fyne.AccessibleRoleHeading:
-		return C.AccessibilityRoleHeading
-	case fyne.AccessibleRoleImage:
-		return C.AccessibilityRoleImage
-	case fyne.AccessibleRoleLink:
-		return C.AccessibilityRoleLink
-	case fyne.AccessibleRoleList:
-		return C.AccessibilityRoleList
-	case fyne.AccessibleRoleListItem:
-		return C.AccessibilityRoleListItem
-	case fyne.AccessibleRoleProgressBar:
-		return C.AccessibilityRoleProgressBar
-	case fyne.AccessibleRoleRadio:
-		return C.AccessibilityRoleRadio
-	case fyne.AccessibleRoleSeparator:
-		return C.AccessibilityRoleSeparator
-	case fyne.AccessibleRoleSlider:
-		return C.AccessibilityRoleSlider
-	case fyne.AccessibleRoleTab:
-		return C.AccessibilityRoleTab
-	case fyne.AccessibleRoleTabList:
-		return C.AccessibilityRoleTabList
-	case fyne.AccessibleRoleTable:
-		return C.AccessibilityRoleTable
-	case fyne.AccessibleRoleText:
-		return C.AccessibilityRoleStaticText
-	case fyne.AccessibleRoleTextField, fyne.AccessibleRoleTextArea:
-		return C.AccessibilityRoleTextField
-	case fyne.AccessibleRoleTree:
-		return C.AccessibilityRoleTree
-	case fyne.AccessibleRoleTreeItem:
-		return C.AccessibilityRoleTreeItem
-	default:
-		return C.AccessibilityRoleGroup
-	}
+func a11yWindowHandle(w *window) uintptr {
+	return uintptr(unsafe.Pointer(w.view().GetCocoaWindow()))
 }
 
-// stateMaskFor builds the C state bitmask from a widget's reported states.
-func stateMaskFor(obj fyne.CanvasObject) int {
-	provider, ok := obj.(fyne.AccessibleStates)
-	if !ok {
-		return 0
+func a11yConnect(string) a11yPlatform { return macPlatform{} }
+
+type macPlatform struct{}
+
+func (macPlatform) Update(nodes []a11yNode) {
+	handles := map[uint64]uintptr{}
+	parents := map[uint64]uint64{}
+	for _, n := range nodes {
+		if n.Window {
+			handles[n.ID] = n.Handle
+		}
+		parents[n.ID] = n.Parent
 	}
-	var mask int
-	for _, s := range provider.AccessibilityStates() {
-		switch s {
-		case fyne.AccessibleStateChecked:
-			mask |= int(C.AccessibilityStateMaskChecked)
-		case fyne.AccessibleStateDisabled:
-			mask |= int(C.AccessibilityStateMaskDisabled)
-		case fyne.AccessibleStateExpanded:
-			mask |= int(C.AccessibilityStateMaskExpanded)
-		case fyne.AccessibleStateFocused:
-			mask |= int(C.AccessibilityStateMaskFocused)
-		case fyne.AccessibleStateInvalid:
-			mask |= int(C.AccessibilityStateMaskInvalid)
-		case fyne.AccessibleStateRequired:
-			mask |= int(C.AccessibilityStateMaskRequired)
-		case fyne.AccessibleStateSelected:
-			mask |= int(C.AccessibilityStateMaskSelected)
+	windowOf := func(id uint64) uintptr {
+		for i := 0; i < 1000 && parents[id] != 0; i++ {
+			id = parents[id]
+		}
+		return handles[id]
+	}
+
+	C.MacA11yBegin()
+	for _, n := range nodes {
+		role := string(n.Role)
+		if n.Window {
+			role = "window"
+		}
+		cRole, cName := C.CString(role), C.CString(n.Name)
+		var children *C.ulonglong
+		if len(n.Children) > 0 {
+			children = (*C.ulonglong)(unsafe.Pointer(&n.Children[0]))
+		}
+		var cText *C.char
+		caret, start, end := C.int(-1), C.int(0), C.int(0)
+		var lines []C.int
+		if n.Text != nil {
+			cText = C.CString(n.Text.Content)
+			at := utf16Offsets(n.Text.Content)
+			if n.Text.Caret >= 0 {
+				caret = C.int(at(n.Text.Caret))
+			}
+			start, end = C.int(at(n.Text.SelectionStart)), C.int(at(n.Text.SelectionEnd))
+			for _, l := range n.Text.Lines {
+				lines = append(lines, C.int(at(l)))
+			}
+		}
+		var cLines *C.int
+		if len(lines) > 0 {
+			cLines = &lines[0]
+		}
+		C.MacA11yNode(C.ulonglong(n.ID), C.ulonglong(n.Parent), C.ulonglong(windowOf(n.ID)), cRole, cName,
+			C.double(n.Bounds.X), C.double(n.Bounds.Y), C.double(n.Bounds.Width), C.double(n.Bounds.Height),
+			C.int(macFlags(n)), children, C.int(len(n.Children)), cText, caret, start, end, cLines, C.int(len(lines)))
+		C.free(unsafe.Pointer(cRole))
+		C.free(unsafe.Pointer(cName))
+		if cText != nil {
+			C.free(unsafe.Pointer(cText))
 		}
 	}
-	return mask
+	C.MacA11yEnd()
 }
 
-// actionMaskFor builds the C action bitmask from a widget's reported actions.
-func actionMaskFor(obj fyne.CanvasObject) (int, bool) {
-	var mask int
-	if _, hasSetter := obj.(fyne.AccessibleValueSetter); hasSetter {
-		mask |= int(C.AccessibilityActionMaskSetValue)
-	}
-	provider, ok := obj.(fyne.AccessibleActions)
-	if !ok {
-		return mask, mask != 0
-	}
-	for _, a := range provider.AccessibilityActions() {
-		switch a {
-		case fyne.AccessibleActionPress:
-			mask |= int(C.AccessibilityActionMaskPress)
-		case fyne.AccessibleActionIncrement:
-			mask |= int(C.AccessibilityActionMaskIncrement)
-		case fyne.AccessibleActionDecrement:
-			mask |= int(C.AccessibilityActionMaskDecrement)
-		case fyne.AccessibleActionShowMenu:
-			mask |= int(C.AccessibilityActionMaskShowMenu)
-		case fyne.AccessibleActionSelect:
-			mask |= int(C.AccessibilityActionMaskSelect)
-		case fyne.AccessibleActionSetValue:
-			mask |= int(C.AccessibilityActionMaskSetValue)
+// macFlags are an object's states and actions for its element.
+func macFlags(n a11yNode) int {
+	f := 0
+	set := func(on bool, flag int) {
+		if on {
+			f |= flag
 		}
 	}
-	return mask, mask != 0
+	has := func(a fyne.AccessibleAction) bool { return slices.Contains(n.Actions, string(a)) }
+	set(n.Focusable, C.MacA11yFocusable)
+	set(n.Disabled, C.MacA11yDisabled)
+	set((n.Role == fyne.AccessibleRoleTextField || n.Role == fyne.AccessibleRoleTextArea) && !n.Disabled, C.MacA11yEditable)
+	set(n.Role == fyne.AccessibleRoleTextArea, C.MacA11yMultiLine)
+	set(has(fyne.AccessibleActionPress), C.MacA11yPress)
+	set(has(fyne.AccessibleActionIncrement), C.MacA11yIncrement)
+	set(has(fyne.AccessibleActionDecrement), C.MacA11yDecrement)
+	set(has(fyne.AccessibleActionShowMenu), C.MacA11yShowMenu)
+	set(has(fyne.AccessibleActionSetValue) || n.Text != nil && !n.Disabled &&
+		(n.Role == fyne.AccessibleRoleTextField || n.Role == fyne.AccessibleRoleTextArea), C.MacA11ySetValue)
+	set(slices.Contains(n.States, fyne.AccessibleStateChecked), C.MacA11yChecked)
+	set(slices.Contains(n.States, fyne.AccessibleStateSelected), C.MacA11ySelected)
+	set(slices.Contains(n.States, fyne.AccessibleStateExpanded), C.MacA11yExpanded)
+	return f
 }
 
-func actionFromC(code int) (fyne.AccessibleAction, bool) {
-	switch C.int(code) {
-	case C.AccessibilityActionPress:
-		return fyne.AccessibleActionPress, true
-	case C.AccessibilityActionIncrement:
-		return fyne.AccessibleActionIncrement, true
-	case C.AccessibilityActionDecrement:
-		return fyne.AccessibleActionDecrement, true
-	case C.AccessibilityActionShowMenu:
-		return fyne.AccessibleActionShowMenu, true
-	case C.AccessibilityActionSelect:
-		return fyne.AccessibleActionSelect, true
-	case C.AccessibilityActionSetValue:
-		return fyne.AccessibleActionSetValue, true
-	}
-	return "", false
-}
+func (macPlatform) Focused(id uint64)                       { C.MacA11yFocus(C.ulonglong(id)) }
+func (macPlatform) WindowActivated(uint64, bool)            {} // AppKit tells it of its windows
+func (macPlatform) TextInserted(id uint64, _ int, _ string) { C.MacA11yTextChanged(C.ulonglong(id)) }
+func (macPlatform) TextDeleted(id uint64, _ int, _ string)  { C.MacA11yTextChanged(C.ulonglong(id)) }
 
-//export fyneAccessibilityPerformAction
-func fyneAccessibilityPerformAction(ctx unsafe.Pointer, actionCode C.int, setValueArg *C.char) C.int {
-	if ctx == nil {
-		return 0
-	}
-	defer func() {
-		// Swallow panics from misbehaving widgets so we never crash AppKit.
-		_ = recover()
-	}()
+// CaretMoved: the caret is the (empty) selected text range; VoiceOver
+// follows it from the selected text changing.
+func (macPlatform) CaretMoved(id uint64, _ int) { C.MacA11ySelectionChanged(C.ulonglong(id)) }
+func (macPlatform) SelectionChanged(id uint64)  { C.MacA11ySelectionChanged(C.ulonglong(id)) }
+func (macPlatform) ForgetWindow(handle uintptr) { C.MacA11yForgetWindow(C.ulonglong(handle)) }
 
-	handle := cgo.Handle(uintptr(ctx))
-	value, ok := handle.Value().(fyne.CanvasObject)
-	if !ok || value == nil {
-		return 0
-	}
+// The requests of assistive technologies (on the main thread: AppKit's).
 
-	act, known := actionFromC(int(actionCode))
-	if !known {
-		return 0
-	}
-
-	if act == fyne.AccessibleActionSetValue {
-		setter, ok := value.(fyne.AccessibleValueSetter)
-		if !ok {
-			return 0
-		}
-		var arg string
-		if setValueArg != nil {
-			arg = C.GoString(setValueArg)
-		}
-		if setter.AccessibilitySetValue(arg) {
-			return 1
-		}
-		return 0
-	}
-
-	performer, ok := value.(fyne.AccessibleActions)
-	if !ok {
-		return 0
-	}
-	if performer.AccessibilityPerformAction(act) {
-		return 1
-	}
-	return 0
-}
-
-//export fyneAccessibilityDestroyContext
-func fyneAccessibilityDestroyContext(ctx unsafe.Pointer) {
-	if ctx == nil {
+//export fyneA11yAction
+func fyneA11yAction(id C.ulonglong, action C.int) {
+	act := [...]fyne.AccessibleAction{fyne.AccessibleActionPress, fyne.AccessibleActionIncrement,
+		fyne.AccessibleActionDecrement, fyne.AccessibleActionShowMenu}
+	if action < 0 || int(action) >= len(act) {
 		return
 	}
-	cgo.Handle(uintptr(ctx)).Delete()
-}
-
-func (w *window) updateAccessibility() {
-	if w.view() == nil {
-		return
-	}
-
-	if oldElements, ok := accessibilityElements[w]; ok {
-		for _, elem := range oldElements {
-			C.AccessibilityElementDestroy(elem)
-		}
-		delete(accessibilityElements, w)
-	}
-
-	var rootElements []C.AccessibilityElementRef
-	if w.canvas.Content() != nil {
-		contentRoots := w.collectAccessibilityElements(w.canvas.Content(), fyne.NewPos(0, 0), nil, 0)
-		rootElements = append(rootElements, contentRoots...)
-	}
-
-	if w.canvas.menu != nil {
-		menuRoots := w.collectAccessibilityElements(w.canvas.menu, fyne.NewPos(0, 0), nil, 0)
-		rootElements = append(rootElements, menuRoots...)
-	}
-
-	for _, overlay := range w.canvas.Overlays().List() {
-		overlayRoots := w.collectAccessibilityElements(overlay, fyne.NewPos(0, 0), nil, 0)
-		rootElements = append(rootElements, overlayRoots...)
-	}
-
-	if w.view() != nil {
-		nsWindow := w.view().GetCocoaWindow()
-		C.AccessibilitySetTargetWindow(nsWindow)
-	}
-
-	for _, rootElem := range rootElements {
-		C.AccessibilityAttachToWindow(rootElem)
-	}
-	accessibilityElements[w] = rootElements
-}
-
-func (w *window) collectAccessibilityElements(
-	obj fyne.CanvasObject,
-	pos fyne.Position,
-	parent C.AccessibilityElementRef,
-	depth int,
-) []C.AccessibilityElementRef {
-	if obj == nil || !obj.Visible() {
-		return nil
-	}
-
-	objPos := pos.Add(obj.Position())
-	var result []C.AccessibilityElementRef
-	currentElement := parent
-
-	if accessible, ok := obj.(fyne.Accessible); ok {
-		label := fyne.AccessibleLabel(obj)
-		role := accessible.AccessibilityRole()
-
-		pixelX := scale.ToScreenCoordinate(w.canvas, objPos.X)
-		pixelY := scale.ToScreenCoordinate(w.canvas, objPos.Y)
-		pixelWidth := scale.ToScreenCoordinate(w.canvas, obj.Size().Width)
-		pixelHeight := scale.ToScreenCoordinate(w.canvas, obj.Size().Height)
-
-		cLabel := C.CString(label)
-		cTitle := C.CString(label)
-		defer C.free(unsafe.Pointer(cLabel))
-		defer C.free(unsafe.Pointer(cTitle))
-
-		// cgo.Handle the live widget so the Obj-C side can route actions
-		// back. The handle is freed by destroyTrampoline when -dealloc fires.
-		handle := cgo.NewHandle(obj)
-		ctx := unsafe.Pointer(uintptr(handle))
-
-		currentElement = C.AccessibilityElementCreate(
-			roleToC(role),
-			cTitle, cLabel,
-			C.double(pixelX), C.double(pixelY),
-			C.double(pixelWidth), C.double(pixelHeight),
-			nil,
-			C.getActionCallback(),
-			ctx,
-			C.getDestroyCallback(),
-		)
-
-		if valued, ok := obj.(fyne.AccessibleValue); ok {
-			cValue := C.CString(valued.AccessibilityValue())
-			C.AccessibilityElementSetValue(currentElement, cValue)
-			C.free(unsafe.Pointer(cValue))
-		}
-
-		C.AccessibilityElementSetStates(currentElement, C.int(stateMaskFor(obj)))
-		if mask, ok := actionMaskFor(obj); ok {
-			C.AccessibilityElementSetSupportedActions(currentElement, C.int(mask))
-		}
-
-		if parent != nil {
-			C.AccessibilityElementAddChild(parent, currentElement)
-		} else {
-			result = append(result, currentElement)
-		}
-	}
-
-	for _, child := range common.AccessibilityChildren(obj) {
-		childResults := w.collectAccessibilityElements(child, objPos, currentElement, depth+1)
-		if parent == nil && currentElement == parent {
-			result = append(result, childResults...)
-		}
-	}
-
-	return result
-}
-
-func (w *window) initAccessibilityForWindow() {
-	if w.view() == nil {
-		return
+	obj, _ := a11yObject(uint64(id))
+	if a, ok := obj.(fyne.AccessibleActions); ok {
+		fyne.Do(func() { a.AccessibilityPerformAction(act[action]) })
 	}
 }
 
-func (w *window) cleanupAccessibilityForWindow() {
-	if w.view() == nil {
-		return
-	}
+//export fyneA11yFocus
+func fyneA11yFocus(id C.ulonglong) { a11yGrabFocus(uint64(id)) }
 
-	if elements, ok := accessibilityElements[w]; ok {
-		for _, elem := range elements {
-			C.AccessibilityElementDestroy(elem)
-		}
-		delete(accessibilityElements, w)
+//export fyneA11ySelect
+func fyneA11ySelect(id C.ulonglong, start, end C.int) {
+	a11y.mu.Lock()
+	text := a11y.texts[uint64(id)].text
+	a11y.mu.Unlock()
+	s, e := runeOffset(text, int(start)), runeOffset(text, int(end))
+	a11yCaret(uint64(id), func(c fyne.AccessibleTextCaret) { c.AccessibilitySetSelection(s, e) })
+}
+
+//export fyneA11ySetValue
+func fyneA11ySetValue(id C.ulonglong, value *C.char) {
+	v := C.GoString(value)
+	obj, _ := a11yObject(uint64(id))
+	if s, ok := obj.(fyne.AccessibleValueSetter); ok {
+		fyne.Do(func() { s.AccessibilitySetValue(v) })
 	}
 }
