@@ -11,115 +11,168 @@ package glfw
 import "C"
 
 import (
+	"slices"
+	"unicode/utf16"
 	"unsafe"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/internal/driver/common"
-	"fyne.io/fyne/v2/internal/scale"
 )
 
-func (w *window) updateAccessibility() {
-	if w.view() == nil {
-		return
-	}
+// The Windows bridge: the snapshots (accessibility_snapshot.go) as UI
+// Automation providers (accessibility_windows.c), for NVDA, JAWS, Narrator
+// and braille displays. UI Automation counts text in UTF-16 code units;
+// Fyne in runes: offsets are converted both ways here.
 
-	hwnd := w.view().GetWin32Window()
-	C.WinAccessibilitySetWindow(unsafe.Pointer(hwnd))
-	C.WinAccessibilityClearElements()
-
-	if w.canvas.Content() != nil {
-		w.collectAccessibleElements(w.canvas.Content(), fyne.NewPos(0, 0))
-	}
-
-	if w.canvas.menu != nil {
-		w.collectAccessibleElements(w.canvas.menu, fyne.NewPos(0, 0))
-	}
-
-	for _, overlay := range w.canvas.Overlays().List() {
-		w.collectAccessibleElements(overlay, fyne.NewPos(0, 0))
-	}
-
-	C.WinAccessibilityUpdate()
+func a11yWindowHandle(w *window) uintptr {
+	return uintptr(unsafe.Pointer(w.view().GetWin32Window()))
 }
 
-func (w *window) collectAccessibleElements(obj fyne.CanvasObject, pos fyne.Position) {
-	if obj == nil || !obj.Visible() {
-		return
+func a11yConnect(string) a11yPlatform {
+	C.WinA11yInit()
+	return winPlatform{}
+}
+
+type winPlatform struct{}
+
+func (winPlatform) Update(nodes []a11yNode) {
+	handles := map[uint64]uintptr{}
+	parents := map[uint64]uint64{}
+	for _, n := range nodes {
+		if n.Window {
+			handles[n.ID] = n.Handle
+		}
+		parents[n.ID] = n.Parent
+	}
+	windowOf := func(id uint64) uintptr {
+		for i := 0; i < 1000 && parents[id] != 0; i++ {
+			id = parents[id]
+		}
+		return handles[id]
 	}
 
-	objPos := pos.Add(obj.Position())
-
-	if accessible, isAccessible := obj.(fyne.Accessible); isAccessible {
-		role := accessible.AccessibilityRole()
-		// Use flat model: skip containers, only add leaf elements
-		if role != fyne.AccessibleRoleContainer {
-			label := fyne.AccessibleLabel(obj)
-
-			pixelX := scale.ToScreenCoordinate(w.canvas, objPos.X)
-			pixelY := scale.ToScreenCoordinate(w.canvas, objPos.Y)
-			pixelW := scale.ToScreenCoordinate(w.canvas, obj.Size().Width)
-			pixelH := scale.ToScreenCoordinate(w.canvas, obj.Size().Height)
-
-			cLabel := C.CString(label)
-			C.WinAccessibilityAddElement(cLabel, roleToCWin(role),
-				C.double(pixelX), C.double(pixelY),
-				C.double(pixelW), C.double(pixelH))
-			C.free(unsafe.Pointer(cLabel))
+	C.WinA11yBegin()
+	for _, n := range nodes {
+		role := string(n.Role)
+		if n.Window {
+			role = "window"
+		}
+		cRole, cName := C.CString(role), C.CString(n.Name)
+		var children *C.ulonglong
+		if len(n.Children) > 0 {
+			children = (*C.ulonglong)(unsafe.Pointer(&n.Children[0]))
+		}
+		var cText *C.char
+		caret, start, end := C.int(-1), C.int(0), C.int(0)
+		var lines []C.int
+		if n.Text != nil {
+			cText = C.CString(n.Text.Content)
+			at := utf16Offsets(n.Text.Content)
+			if n.Text.Caret >= 0 {
+				caret = C.int(at(n.Text.Caret))
+			}
+			start, end = C.int(at(n.Text.SelectionStart)), C.int(at(n.Text.SelectionEnd))
+			for _, l := range n.Text.Lines {
+				lines = append(lines, C.int(at(l)))
+			}
+		}
+		var cLines *C.int
+		if len(lines) > 0 {
+			cLines = &lines[0]
+		}
+		C.WinA11yNode(C.ulonglong(n.ID), C.ulonglong(n.Parent), C.ulonglong(windowOf(n.ID)), cRole, cName,
+			C.int(n.Bounds.X), C.int(n.Bounds.Y), C.int(n.Bounds.Width), C.int(n.Bounds.Height), C.int(winFlags(n)),
+			children, C.int(len(n.Children)), cText, caret, start, end, cLines, C.int(len(lines)))
+		C.free(unsafe.Pointer(cRole))
+		C.free(unsafe.Pointer(cName))
+		if cText != nil {
+			C.free(unsafe.Pointer(cText))
 		}
 	}
+	C.WinA11yEnd()
+}
 
-	for _, child := range common.AccessibilityChildren(obj) {
-		w.collectAccessibleElements(child, objPos)
+// winFlags are an object's states for the providers.
+func winFlags(n a11yNode) int {
+	f := 0
+	set := func(on bool, flag int) {
+		if on {
+			f |= flag
+		}
+	}
+	set(n.Focusable, C.WinA11yFocusable)
+	set(n.Disabled, C.WinA11yDisabled)
+	set((n.Role == fyne.AccessibleRoleTextField || n.Role == fyne.AccessibleRoleTextArea) && !n.Disabled, C.WinA11yEditable)
+	set(n.Role == fyne.AccessibleRoleTextArea, C.WinA11yMultiLine)
+	set(slices.Contains(n.Actions, string(fyne.AccessibleActionPress)), C.WinA11yInvoke)
+	set(slices.Contains(n.States, fyne.AccessibleStateChecked), C.WinA11yChecked)
+	set(slices.Contains(n.States, fyne.AccessibleStateSelected), C.WinA11ySelected)
+	set(slices.Contains(n.States, fyne.AccessibleStateExpanded), C.WinA11yExpanded)
+	return f
+}
+
+func (winPlatform) Focused(id uint64)                       { C.WinA11yFocus(C.ulonglong(id)) }
+func (winPlatform) WindowActivated(uint64, bool)            {} // the window's own provider tells it
+func (winPlatform) TextInserted(id uint64, _ int, _ string) { C.WinA11yTextChanged(C.ulonglong(id)) }
+func (winPlatform) TextDeleted(id uint64, _ int, _ string)  { C.WinA11yTextChanged(C.ulonglong(id)) }
+
+// CaretMoved: on Windows the caret is the (empty) selection; braille and
+// screen readers follow it from TextSelectionChanged.
+func (winPlatform) CaretMoved(id uint64, _ int) { C.WinA11ySelectionChanged(C.ulonglong(id)) }
+func (winPlatform) SelectionChanged(id uint64)  { C.WinA11ySelectionChanged(C.ulonglong(id)) }
+func (winPlatform) ForgetWindow(handle uintptr) { C.WinA11yForgetWindow(C.ulonglong(handle)) }
+
+// utf16Offsets converts rune offsets in s to UTF-16 offsets.
+func utf16Offsets(s string) func(int) int {
+	at := make([]int, 0, len(s)+1)
+	n := 0
+	for _, r := range s {
+		at = append(at, n)
+		n += utf16.RuneLen(r)
+	}
+	at = append(at, n)
+	return func(runes int) int { return at[min(max(runes, 0), len(at)-1)] }
+}
+
+// runeOffset converts a UTF-16 offset in s to runes.
+func runeOffset(s string, units int) int {
+	n, i := 0, 0
+	for _, r := range s {
+		if n >= units {
+			return i
+		}
+		n += utf16.RuneLen(r)
+		i++
+	}
+	return i
+}
+
+// The requests of assistive technologies, from UI Automation's threads.
+
+//export fyneA11yInvoke
+func fyneA11yInvoke(id C.ulonglong) {
+	obj, _ := a11yObject(uint64(id))
+	if a, ok := obj.(fyne.AccessibleActions); ok {
+		fyne.Do(func() { a.AccessibilityPerformAction(fyne.AccessibleActionPress) })
 	}
 }
 
-func roleToCWin(role fyne.AccessibleRole) C.WinAccessibilityRole {
-	switch role {
-	case fyne.AccessibleRoleButton:
-		return C.WinAccessibilityRoleButton
-	case fyne.AccessibleRoleCheckbox:
-		return C.WinAccessibilityRoleCheckbox
-	case fyne.AccessibleRoleHeading:
-		return C.WinAccessibilityRoleHeading
-	case fyne.AccessibleRoleImage:
-		return C.WinAccessibilityRoleImage
-	case fyne.AccessibleRoleLink:
-		return C.WinAccessibilityRoleLink
-	case fyne.AccessibleRoleList:
-		return C.WinAccessibilityRoleList
-	case fyne.AccessibleRoleListItem:
-		return C.WinAccessibilityRoleListItem
-	case fyne.AccessibleRoleProgressBar:
-		return C.WinAccessibilityRoleProgressBar
-	case fyne.AccessibleRoleRadio:
-		return C.WinAccessibilityRoleRadio
-	case fyne.AccessibleRoleSeparator:
-		return C.WinAccessibilityRoleSeparator
-	case fyne.AccessibleRoleSlider:
-		return C.WinAccessibilityRoleSlider
-	case fyne.AccessibleRoleTab:
-		return C.WinAccessibilityRoleTab
-	case fyne.AccessibleRoleTabList:
-		return C.WinAccessibilityRoleTabList
-	case fyne.AccessibleRoleTable:
-		return C.WinAccessibilityRoleTable
-	case fyne.AccessibleRoleText:
-		return C.WinAccessibilityRoleText
-	case fyne.AccessibleRoleTextField, fyne.AccessibleRoleTextArea:
-		return C.WinAccessibilityRoleTextField
-	case fyne.AccessibleRoleTree:
-		return C.WinAccessibilityRoleTree
-	case fyne.AccessibleRoleTreeItem:
-		return C.WinAccessibilityRoleTreeItem
-	default:
-		return C.WinAccessibilityRoleGroup
+//export fyneA11yFocus
+func fyneA11yFocus(id C.ulonglong) { a11yGrabFocus(uint64(id)) }
+
+//export fyneA11ySelect
+func fyneA11ySelect(id C.ulonglong, start, end C.int) {
+	a11y.mu.Lock()
+	text := a11y.texts[uint64(id)].text
+	a11y.mu.Unlock()
+	s, e := runeOffset(text, int(start)), runeOffset(text, int(end))
+	a11yCaret(uint64(id), func(c fyne.AccessibleTextCaret) { c.AccessibilitySetSelection(s, e) })
+}
+
+//export fyneA11ySetValue
+func fyneA11ySetValue(id C.ulonglong, value *C.char) {
+	v := C.GoString(value)
+	obj, _ := a11yObject(uint64(id))
+	if s, ok := obj.(fyne.AccessibleValueSetter); ok {
+		fyne.Do(func() { s.AccessibilitySetValue(v) })
 	}
-}
-
-func (w *window) initAccessibilityForWindow() {
-	// Initialization is handled lazily in updateAccessibility
-}
-
-func (w *window) cleanupAccessibilityForWindow() {
-	C.WinAccessibilityCleanup()
 }

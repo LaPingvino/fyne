@@ -1,4 +1,4 @@
-//go:build accessibility && linux
+//go:build accessibility && (linux || windows)
 
 package glfw
 
@@ -26,8 +26,9 @@ import (
 type a11yNode struct {
 	ID, Parent uint64 // Parent 0: a window
 	Children   []uint64
-	Window     bool // a window (its Role is unset)
-	Active     bool // the window has the focus
+	Window     bool    // a window (its Role is unset)
+	Handle     uintptr // a window's native handle (Windows)
+	Active     bool    // the window has the focus
 	Role       fyne.AccessibleRole
 	Name       string
 	Bounds     a11yRect // in pixels of the window
@@ -54,6 +55,7 @@ type a11yPlatform interface {
 	Update(nodes []a11yNode) // all windows' objects
 	Focused(id uint64)
 	WindowActivated(id uint64, active bool)
+	ForgetWindow(handle uintptr) // the window closes
 }
 
 // textTeller is what textEvents tells changes to.
@@ -144,7 +146,7 @@ func (w *window) updateAccessibility() {
 	}
 	size := w.canvas.Size()
 	focusedWindow := w.view().GetAttrib(glfw.Focused) == glfw.True
-	nodes := []a11yNode{{ID: winID, Window: true, Active: focusedWindow, Name: w.title,
+	nodes := []a11yNode{{ID: winID, Window: true, Handle: a11yWindowHandle(w), Active: focusedWindow, Name: w.title,
 		Bounds: a11yRect{Width: int32(scale.ToScreenCoordinate(w.canvas, size.Width)), Height: int32(scale.ToScreenCoordinate(w.canvas, size.Height))}}}
 	seen := map[uint64]bool{}
 	auto := fyne.AccessibilityAutomatic()
@@ -408,4 +410,7 @@ func (w *window) cleanupAccessibilityForWindow() {
 	all := a11yAllNodes()
 	a11y.mu.Unlock()
 	a11y.platform.Update(all)
+	if w.view() != nil {
+		a11y.platform.ForgetWindow(a11yWindowHandle(w))
+	}
 }

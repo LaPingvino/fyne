@@ -33,6 +33,10 @@ func a11yConnect(name string) a11yPlatform {
 // atspiPlatform is the AT-SPI bridge as an a11yPlatform.
 type atspiPlatform struct{ *atspi.Bridge }
 
+func (atspiPlatform) ForgetWindow(uintptr) {}
+
+func a11yWindowHandle(*window) uintptr { return 0 }
+
 func (p atspiPlatform) Update(nodes []a11yNode) {
 	out := make([]atspi.Node, len(nodes))
 	for i, n := range nodes {
