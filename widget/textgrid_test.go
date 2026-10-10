@@ -1,7 +1,9 @@
 package widget
 
 import (
+	"fyne.io/fyne/v2/internal/painter"
 	"image/color"
+	"math"
 	"strings"
 	"testing"
 
@@ -13,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewTextGrid(t *testing.T) {
@@ -492,47 +495,68 @@ func rendererCell(r *textGridRowRenderer, col int) (*canvas.Rectangle, *canvas.T
 	return r.obj.objects[i].(*canvas.Rectangle), r.obj.objects[i+1].(*canvas.Text)
 }
 
-type fontTheme struct {
+type overrideFontTheme struct {
 	fyne.Theme
 	mono fyne.Resource
 }
 
-func (f *fontTheme) Font(s fyne.TextStyle) fyne.Resource {
+func (o *overrideFontTheme) Font(s fyne.TextStyle) fyne.Resource {
 	if s.Monospace {
-		return f.mono
+		return o.mono
 	}
-	return f.Theme.Font(s)
+	return o.Theme.Font(s)
 }
 
-// Under a theme override, the cells are drawn (and sized, and cached) in
-// the override's font: without naming it, the caches of text sizes and
-// textures gave letters drawn in another font elsewhere.
+// Text under a theme override with another monospace font is measured in
+// that font, also when the same text was measured in the app theme before
+// (the text size cache keyed both alike, and letters of the app theme's
+// size were used under the override: mixed sizes in a TextGrid); the grid's
+// cells are measured in it too.
 func TestTextGrid_ThemeOverrideFont(t *testing.T) {
 	test.NewTempApp(t)
-	mono := fyne.NewStaticResource("override-mono.ttf", theme.TextMonospaceFont().Content())
-	grid := NewTextGridFromString("AB")
-	cache.OverrideTheme(grid, &fontTheme{Theme: test.Theme(), mono: mono})
-	w := test.NewTempWindow(t, grid)
-	w.Resize(fyne.NewSize(100, 50))
-	grid.Refresh()
+	// a font measured very unlike the default monospace one
+	th := &overrideFontTheme{Theme: test.Theme(), mono: theme.DefaultTextFont()}
+	style := fyne.TextStyle{Monospace: true}
+	want, _ := painter.RenderedTextSize("ABCDEFG", 21, style, th.mono)
 
-	found := 0
-	var walk func(o fyne.CanvasObject)
-	walk = func(o fyne.CanvasObject) {
-		if txt, ok := o.(*canvas.Text); ok && (txt.Text == "A" || txt.Text == "B") {
-			found++
-			assert.Equal(t, mono, txt.FontSource, "cell %q", txt.Text)
-		}
-		if wid, ok := o.(fyne.Widget); ok {
-			for _, c := range test.TempWidgetRenderer(t, wid).Objects() {
-				walk(c)
-			}
-		} else if c, ok := o.(*fyne.Container); ok {
-			for _, k := range c.Objects {
-				walk(k)
+	plain := canvas.NewText("ABCDEFG", nil)
+	plain.TextSize, plain.TextStyle = 21, style
+	appSize := plain.MinSize() // measured (and cached) in the app theme
+	require.NotEqual(t, want, appSize, "the fonts must measure differently for this test")
+
+	under := canvas.NewText("ABCDEFG", nil)
+	under.TextSize, under.TextStyle = 21, style
+	cache.OverrideTheme(under, th)
+	assert.Equal(t, want, under.MinSize(), "text under the override")
+
+	grid := NewTextGridFromString("ABC")
+	cache.OverrideTheme(grid, th)
+	test.NewTempWindow(t, grid)
+	cell, _ := painter.RenderedTextSize("M", th.Size(theme.SizeNameText), style, th.mono)
+	assert.Equal(t, float32(math.Round(float64(cell.Width))), grid.content.cellSize.Width, "the grid's cells")
+}
+
+// Rows and cells a grid makes after a theme override was applied join its
+// scope, as List and Tree items do (they were drawn in the app theme).
+func TestTextGrid_NewCellsInTheOverrideScope(t *testing.T) {
+	test.NewTempApp(t)
+	grid := NewTextGridFromString("a")
+	cache.OverrideTheme(grid, test.Theme())
+	w := test.NewTempWindow(t, grid)
+	w.Resize(fyne.NewSize(400, 300))
+	grid.SetText(strings.Repeat("longer row of text\n", 8)) // new rows and cells
+	scope := cache.WidgetScopeID(grid)
+	require.NotEmpty(t, scope)
+	cells := 0
+	for _, r := range grid.content.visible {
+		row := r.(*textGridRow)
+		assert.Equal(t, scope, cache.WidgetScopeID(row), "row")
+		for _, o := range row.objects {
+			if txt, ok := o.(*canvas.Text); ok {
+				cells++
+				assert.Equal(t, scope, cache.WidgetScopeID(txt), "cell %q", txt.Text)
 			}
 		}
 	}
-	walk(grid)
-	assert.Equal(t, 2, found)
+	assert.Greater(t, cells, 50)
 }

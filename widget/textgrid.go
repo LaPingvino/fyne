@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/internal/async"
+	"fyne.io/fyne/v2/internal/cache"
 	"fyne.io/fyne/v2/internal/painter"
 	"fyne.io/fyne/v2/internal/widget"
 	"fyne.io/fyne/v2/theme"
@@ -644,10 +645,10 @@ func (t *textGridContentRenderer) addRowsIfRequired() {
 
 func (t *textGridContentRenderer) updateCellSize() {
 	th := t.text.Theme()
-	// measured in the font the cells are drawn in (MeasureText would take
-	// the default theme's, not an override's)
-	style := fyne.TextStyle{Monospace: true}
-	size, _ := fyne.CurrentApp().Driver().RenderedTextSize("M", th.Size(theme.SizeNameText), style, th.Font(style))
+	// in the grid's scope: a theme override's monospace font, not the app's
+	cell := &canvas.Text{Text: "M", TextSize: th.Size(theme.SizeNameText), TextStyle: fyne.TextStyle{Monospace: true}}
+	cache.OverrideThemeMatchingScope(cell, t.text) // the grid's scope, not a new one
+	size := cell.MinSize()
 
 	// round it for seamless background
 	size.Width = float32(math.Round(float64(size.Width)))
@@ -666,14 +667,12 @@ type textGridRow struct {
 
 	cachedFGColor  color.Color
 	cachedTextSize float32
-	// cachedTheme is the grid's theme (with any override around it), whose
-	// fonts its cells are drawn in
-	cachedTheme fyne.Theme
 }
 
 func newTextGridRow(t *textGridContent, row int) *textGridRow {
 	newRow := &textGridRow{text: t, row: row}
 	newRow.ExtendBaseWidget(newRow)
+	cache.OverrideThemeMatchingScope(newRow, t.text) // (as the cells, appendTextCell)
 
 	return newRow
 }
@@ -700,6 +699,11 @@ func (t *textGridRow) appendTextCell(str rune) {
 
 	bg := canvas.NewRectangle(color.Transparent)
 
+	// in the grid's theme scope, as List and Tree do with the items they
+	// make: a cell made after a ThemeOverride was applied was drawn in the
+	// app theme's font and size otherwise
+	cache.OverrideThemeMatchingScope(text, t.text.text)
+	cache.OverrideThemeMatchingScope(bg, t.text.text)
 	t.objects = append(t.objects, bg, text)
 }
 
@@ -741,20 +745,11 @@ func (t *textGridRow) setCellRune(str rune, pos int, style, rowStyle TextGridSty
 		fg = rowStyle.TextColor()
 	}
 
-	// the cell's font, named: a theme override's font is not part of the
-	// caches of text sizes and textures, and a letter drawn in another font
-	// elsewhere was used for it (letters of the wrong size and shape)
-	var source fyne.Resource
-	if t.cachedTheme != nil {
-		source = t.cachedTheme.Font(textStyle)
-	}
-
 	newStr := string(str)
-	if text.Text != newStr || text.Color != fg || textStyle != text.TextStyle || text.FontSource != source {
+	if text.Text != newStr || text.Color != fg || textStyle != text.TextStyle {
 		text.Text = newStr
 		text.Color = fg
 		text.TextStyle = textStyle
-		text.FontSource = source
 		text.Refresh()
 	}
 
@@ -916,7 +911,6 @@ func (t *textGridRowRenderer) Refresh() {
 	v := fyne.CurrentApp().Settings().ThemeVariant()
 	t.obj.cachedFGColor = th.Color(theme.ColorNameForeground, v)
 	t.obj.cachedTextSize = th.Size(theme.SizeNameText)
-	t.obj.cachedTheme = th
 	TextGridStyleWhitespace = &CustomTextGridStyle{FGColor: th.Color(theme.ColorNameDisabled, v)}
 	t.obj.updateGridSize(t.obj.text.text.Size())
 	t.obj.refreshCells()
