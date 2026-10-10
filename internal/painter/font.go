@@ -255,8 +255,10 @@ func RenderedTextSize(text string, fontSize float32, style fyne.TextStyle, sourc
 	return RenderedTextSizeFor(nil, text, fontSize, style, source)
 }
 
-// RenderedTextSizeFor is RenderedTextSize for text drawn as part of o: in
-// the fonts of the theme override o is in, if any.
+// RenderedTextSizeFor is RenderedTextSize for text drawn as part of o.
+// Text without a source is drawn in the fonts of the theme scope o is in
+// (CachedFontFace with o), so it is measured in them and cached under that
+// scope: its size then matches how it is drawn.
 func RenderedTextSizeFor(o fyne.CanvasObject, text string, fontSize float32, style fyne.TextStyle, source fyne.Resource) (size fyne.Size, baseline float32) {
 	scope := ""
 	if o != nil {
