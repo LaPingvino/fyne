@@ -812,3 +812,9 @@ func NewGoMobileDriver() fyne.Driver {
 	registerRepository(d)
 	return d
 }
+
+// RenderedTextSizeFor measures text drawn as part of o, in the fonts of
+// the theme override o is in (canvas.Text uses it when a driver has it).
+func (*driver) RenderedTextSizeFor(o fyne.CanvasObject, text string, size float32, style fyne.TextStyle, source fyne.Resource) (fyne.Size, float32) {
+	return painter.RenderedTextSizeFor(o, text, size, style, source)
+}
