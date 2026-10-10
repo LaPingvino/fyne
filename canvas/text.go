@@ -40,8 +40,11 @@ func (t *Text) Hide() {
 // MinSize returns the minimum size of this text object based on its font size and content.
 // This is normally determined by the render implementation.
 func (t *Text) MinSize() fyne.Size {
-	// in the fonts of a theme override around the text, where the driver
-	// can tell (the sizes of the app theme's fonts are not those)
+	// A Text is measured in the font it is drawn in. Without a FontSource
+	// that is the font of the theme scope the text is in (a ThemeOverride
+	// around it), which only the object can tell: a driver that measures
+	// by object (RenderedTextSizeFor) does so; RenderedTextSize knows only
+	// the app theme.
 	d := fyne.CurrentApp().Driver()
 	if scoped, ok := d.(interface {
 		RenderedTextSizeFor(fyne.CanvasObject, string, float32, fyne.TextStyle, fyne.Resource) (fyne.Size, float32)

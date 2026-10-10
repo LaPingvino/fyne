@@ -236,8 +236,8 @@ func usesUnixSystrayIcon(osName string) bool {
 	return osName == goos.Linux || goos.IsBSD(osName)
 }
 
-// RenderedTextSizeFor measures text drawn as part of o, in the fonts of
-// the theme override o is in (canvas.Text uses it when a driver has it).
+// RenderedTextSizeFor measures text drawn as part of o in the fonts of the
+// theme scope o is in, where it is drawn; canvas.Text measures through it.
 func (*gLDriver) RenderedTextSizeFor(o fyne.CanvasObject, text string, size float32, style fyne.TextStyle, source fyne.Resource) (fyne.Size, float32) {
 	return painter.RenderedTextSizeFor(o, text, size, style, source)
 }

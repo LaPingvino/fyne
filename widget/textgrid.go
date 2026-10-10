@@ -660,9 +660,12 @@ func (t *textGridContentRenderer) addRowsIfRequired() {
 
 func (t *textGridContentRenderer) updateCellSize() {
 	th := t.text.Theme()
-	// in the grid's scope: a theme override's monospace font, not the app's
+	// The cells are drawn in the grid's theme scope (and its monospace
+	// font), so the cell size is measured there too: a probe cell joins the
+	// grid's scope and is measured as the cells are (fyne.MeasureText
+	// measures in the app theme).
 	cell := &canvas.Text{Text: "M", TextSize: th.Size(theme.SizeNameText), TextStyle: fyne.TextStyle{Monospace: true}}
-	cache.OverrideThemeMatchingScope(cell, t.text) // the grid's scope, not a new one
+	cache.OverrideThemeMatchingScope(cell, t.text)
 	size := cell.MinSize()
 
 	// round it for seamless background
@@ -687,7 +690,9 @@ type textGridRow struct {
 func newTextGridRow(t *textGridContent, row int) *textGridRow {
 	newRow := &textGridRow{text: t, row: row}
 	newRow.ExtendBaseWidget(newRow)
-	cache.OverrideThemeMatchingScope(newRow, t.text) // (as the cells, appendTextCell)
+	// objects made after a ThemeOverride was applied join its scope (see
+	// appendTextCell)
+	cache.OverrideThemeMatchingScope(newRow, t.text)
 
 	return newRow
 }
@@ -714,9 +719,11 @@ func (t *textGridRow) appendTextCell(str rune) {
 
 	bg := canvas.NewRectangle(color.Transparent)
 
-	// in the grid's theme scope, as List and Tree do with the items they
-	// make: a cell made after a ThemeOverride was applied was drawn in the
-	// app theme's font and size otherwise
+	// A widget's objects belong to its theme scope. The grid makes rows and
+	// cells after a ThemeOverride was applied to it (as its text grows, or
+	// rows are reused), so they join the grid's scope here, as List and Tree
+	// do with the items they make; outside it they would be measured and
+	// drawn with the app theme.
 	cache.OverrideThemeMatchingScope(text, t.text.text)
 	cache.OverrideThemeMatchingScope(bg, t.text.text)
 	t.objects = append(t.objects, bg, text)

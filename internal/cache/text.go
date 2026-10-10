@@ -27,8 +27,10 @@ type fontSizeEntry struct {
 	Size   float32
 	Style  fyne.TextStyle
 	Source string
-	// Scope is the theme override the text is in (WidgetScopeID): its
-	// fonts are not the app theme's
+	// Scope identifies the theme scope whose fonts the text is measured and
+	// drawn in (WidgetScopeID: a ThemeOverride, "" for the app theme). Text
+	// without a Source takes its font from its scope, so the same text in
+	// two scopes is two entries.
 	Scope string
 }
 
@@ -44,7 +46,7 @@ func GetFontMetrics(text string, fontSize float32, style fyne.TextStyle, source 
 	name := ""
 	if source != nil {
 		name = source.Name()
-		scope = "" // the source is the font, whatever the theme
+		scope = "" // a Source names the font itself: one size in every scope
 	}
 	fontSizeLock.Lock()
 	defer fontSizeLock.Unlock()
@@ -61,7 +63,7 @@ func SetFontMetrics(text string, fontSize float32, style fyne.TextStyle, source 
 	name := ""
 	if source != nil {
 		name = source.Name()
-		scope = ""
+		scope = "" // as in GetFontMetrics
 	}
 	ent := fontSizeEntry{text, fontSize, style, name, scope}
 	metric := &fontMetric{size: size, baseLine: base}
